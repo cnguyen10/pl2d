@@ -1,0 +1,30 @@
+dataset:
+  name: chaoyang
+  root: /sda2/datasets/chaoyang
+  num_classes: 4
+  missing_rate: 0.5
+  train_files:
+  - ${dataset.root}/annotations_3/label_A_train_${dataset.missing_rate}.json
+  - ${dataset.root}/annotations_3/label_B_train_${dataset.missing_rate}.json
+  # - ${dataset.root}/annotations_3/label_C_train_${dataset.missing_rate}.json
+  train_complete_files:
+  - ${dataset.root}/annotations_3/label_A_train.json
+  - ${dataset.root}/annotations_3/label_B_train.json
+  # - ${dataset.root}/annotations_3/label_C_train.json
+  train_ground_truth_file: ${dataset.root}/annotations_3/train.json
+  test_files:
+  - ${dataset.root}/annotations_3/label_A_test.json
+  - ${dataset.root}/annotations_3/label_B_test.json
+  # - ${dataset.root}/annotations_3/label_C_test.json
+  test_ground_truth_file: ${dataset.root}/annotations_3/test.json
+  resized_shape: [256, 256]
+  crop_size: [224, 224]
+
+model:
+  _partial_: True
+  _target_: models.ResNet.resnet18
+
+hparams:
+  Dirichlet_concentration: [1., 1., 1.]
+  epsilon_lower: [0., 0., 0.]
+  epsilon_upper: [1., 1., 0.2]

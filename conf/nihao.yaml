@@ -1,0 +1,27 @@
+dataset:
+  name: cxr8
+  root: /sda2/datasets/cxr8/images
+  num_classes: 2
+  missing_rate: 0.2
+  train_files:
+    - /sda2/datasets/cxr8/expert/train_${dataset.missing_rate}.json
+  train_complete_files:
+    - /sda2/datasets/cxr8/expert/expert_train.json
+  train_ground_truth_file: /sda2/datasets/cxr8/train.json
+  test_files:
+    - /sda2/datasets/cxr8/expert/expert_test.json
+  test_ground_truth_file: /sda2/datasets/cxr8/test.json
+  resized_shape: [256, 256]
+  crop_size: [224, 224]
+  prob_random_h_flip: 0.5
+  mean: null
+  std: null
+
+model:
+  _partial_: True
+  _target_: models.ResNet.resnet18
+
+hparams:
+  Dirichlet_concentration: [1., 1.]
+  epsilon_lower: [0., 0.]
+  epsilon_upper: [1., 0.2]
