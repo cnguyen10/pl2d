@@ -65,23 +65,24 @@ def create_train_state_batch(state: TrainState) -> TrainState:
     return states
 
 
-# @partial(jax.jit, device=jax.devices()[-1])
 @jax.jit
 def constrained_posterior(
     log_q_z_unconstrained: Array,  # (batch, num_experts + 1)
-    varepsilon: Array,  # (num_experts,)
-    epsilon: Array  # (num_experts,)
+    epsilon_upper: Array,  # (num_experts + 1,)
+    epsilon_lower: Array,  # (num_experts + 1,)
 ) -> Array:
     """calculate the work-load balancing posterior
 
     Args:
         log_q_z_unconstrained: the unconstrained posterior of z
-        varepsilon: the hyperparameter for upper constraint
-        epsilon: the hyperparameter for lower constraint
+        epsilon_upper: the hyperparameter for upper constraint
+        epsilon_lower: the hyperparameter for lower constraint
 
     Returns:
         log_q_z: the constrained posterior of z
     """
+    num_samples = log_q_z_unconstrained.shape[0]
+
     def duality_Lagrangian(lmbd_params: dict[str, Array]) -> Scalar:
         """the duality of Lagrangian to find the Lagrange multiplier
 
@@ -93,11 +94,12 @@ def constrained_posterior(
             lagrangian:
         """
         lagrangian = jax.nn.logsumexp(
-            a=log_q_z_unconstrained - lmbd_params['lmbd'] + lmbd_params['lmbd_lower'] - 1,
+            a=log_q_z_unconstrained - lmbd_params['lmbd_upper'] + lmbd_params['lmbd_lower'] - 1,
             axis=(0, 1)
         )  # scalar
-        lagrangian = lagrangian + jnp.sum(a=lmbd_params['lmbd'] * varepsilon, axis=0)
-        lagrangian = lagrangian - jnp.sum(a=lmbd_params['lmbd_lower'] * epsilon, axis=0)
+        lagrangian = jnp.exp(lagrangian - jnp.log(num_samples))
+        lagrangian = lagrangian + jnp.sum(a=lmbd_params['lmbd_upper'] * epsilon_upper, axis=0)
+        lagrangian = lagrangian - jnp.sum(a=lmbd_params['lmbd_lower'] * epsilon_lower, axis=0)
 
         return lagrangian
 
@@ -108,13 +110,13 @@ def constrained_posterior(
         tol=1e-4
     )
     pg_sol = pg.run(init_params=dict(
-        lmbd=jnp.ones_like(a=varepsilon),
-        lmbd_lower=jnp.ones_like(a=epsilon)
+        lmbd_upper=jnp.ones_like(a=epsilon_upper),
+        lmbd_lower=0.1 * jnp.ones_like(a=epsilon_lower)
         )
     )
     lmbd_params = pg_sol.params  # (num_experts,)  <== need to check
 
-    log_q_z = log_q_z_unconstrained - lmbd_params['lmbd'] + lmbd_params['lmbd_lower'] - 1
+    log_q_z = log_q_z_unconstrained - lmbd_params['lmbd_upper'] + lmbd_params['lmbd_lower'] - 1
 
     # normalisation
     log_q_z -= jax.nn.logsumexp(a=log_q_z, axis=-1, keepdims=True)
@@ -289,7 +291,7 @@ def expectation_maximisation(
         log_p_t_x = jax.nn.log_softmax(x=logits_t_x, axis=-1)  # (num_experts + 1, batch, num_classes)
         log_p_t_x = jnp.swapaxes(a=log_p_t_x, axis1=0, axis2=1)  # (batch, num_experts + 1, num_classes)
 
-        # expectation
+        # region E STEP
         q_z, q_t = jax.lax.stop_gradient(
             x=unconstrained_posteriors(
                 log_p_z_x=log_p_z_x,
@@ -301,11 +303,23 @@ def expectation_maximisation(
                 num_iterations=cfg.training.num_fixed_point_iterations
             )
         )
+
+        # initialise the parameters of lower and upper constraints
+        epsilon_lower = jnp.array(
+            object=cfg.hparams.epsilon_lower,
+            dtype=jnp.float32
+        )  # (num_experts + 1,)
+        epsilon_upper = jnp.array(
+            object=cfg.hparams.epsilon_upper,
+            dtype=jnp.float32
+        )  # (num_epxerts + 1,)
+
         log_q_z = constrained_posterior(
             log_q_z_unconstrained=jnp.log(q_z),
-            varepsilon=jnp.array(object=cfg.hparams.epsilon_upper, dtype=jnp.float32),
-            epsilon=jnp.array(object=cfg.hparams.epsilon_lower, dtype=jnp.float32)
+            epsilon_upper=epsilon_upper,
+            epsilon_lower=epsilon_lower
         )
+        # endregion
 
         # q_t for classifier is the ground truth labels
         q_t = q_t * (1 - masks) + masks * annotations_one_hot
@@ -410,7 +424,6 @@ def train(
     )
 
 
-# @partial(jax.jit, device=jax.devices()[-1])
 @jax.jit
 def gating_prediction_step(x: Array, state: TrainState) -> Array:
     """
@@ -424,7 +437,6 @@ def gating_prediction_step(x: Array, state: TrainState) -> Array:
     return logits
 
 
-# @partial(jax.jit, device=jax.devices()[-1])
 @jax.jit
 def expert_prediction_step(x: Array, theta_state: TrainState) -> Array:
     logits, _ = theta_state.apply_fn(
