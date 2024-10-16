@@ -13,7 +13,7 @@ experiment:
   name: PL2D
   tracking_uri: sqlite:///PL2D.db
   logdir: ./logdir
-  run_id: null
+  run_id: 32fbdb7f578a4d239a7cd70bd8087888
 
 hparams:
   prob_random_h_flip: 0.5
@@ -21,11 +21,11 @@ hparams:
   std: null
 
 training:
-  gating_lr: 0.025
-  expert_lr: 0.05
+  gating_lr: 0.01
+  expert_lr: 0.01
   num_fixed_point_iterations: 10
   batch_size: 128
-  num_epochs: 300
+  num_epochs: 1000
 
 data_loading:
   progress_bar: True

@@ -118,34 +118,52 @@ def main(cfg: DictConfig) -> None:
         enable_async_checkpointing=True
     )
 
-    # # load pretrained classifier
-    # state = initialise_huggingface_resnet(
-    #     model=base_model(
-    #         num_classes=cfg.dataset.num_classes,
-    #         input_shape=(1,) + tuple(cfg.dataset.crop_size) + (dset_train[0]['image'].shape[-1],),
-    #         dtype=jnp.bfloat16
-    #     ),
-    #     sample=jnp.expand_dims(a=dset_train[0]['image'] / 255, axis=0),
-    #     num_training_samples=len(dset_train),
-    #     lr=cfg.training.gating_lr,
-    #     batch_size=cfg.training.batch_size,
-    #     num_epochs=cfg.training.num_epochs,
-    #     key=jax.random.key(seed=random.randint(a=0, b=10_000))
-    # )
-    # with ocp.CheckpointManager(
-    #     directory='/sda2/cuong_code/classification/logdir/Classification/4cf654e9a8404d3ea6ac78bb37bb9b85/',
-    #     options=ckpt_options
-    # ) as ckpt_mngr:
-    #     state = ckpt_mngr.restore(step=1000, args=ocp.args.StandardRestore())
+    # load pretrained classifier
+    state = initialise_huggingface_resnet(
+        model=base_model(
+            num_classes=cfg.dataset.num_classes,
+            input_shape=(1,) + tuple(cfg.dataset.crop_size) + (dset_train[0]['image'].shape[-1],),
+            dtype=jnp.bfloat16
+        ),
+        sample=jnp.expand_dims(a=dset_train[0]['image'] / 255, axis=0),
+        num_training_samples=len(dset_train),
+        lr=cfg.training.gating_lr,
+        batch_size=cfg.training.batch_size,
+        num_epochs=cfg.training.num_epochs,
+        key=jax.random.key(seed=random.randint(a=0, b=10_000))
+    )
+    with ocp.CheckpointManager(
+        directory='/sda2/cuong_code/classification/logdir/Classification/4cf654e9a8404d3ea6ac78bb37bb9b85/',
+        # item_names=('gating_state', 'theta_state'),
+        # directory='/sda2/cuong_code/pl2d/logdir/PL2D/79c84177cc2b40aea67004e165e1c62a',
+        options=ckpt_options
+    ) as ckpt_mngr:
+        # checkpoint = ckpt_mngr.restore(
+        #     step=1000,
+        #     args=ocp.args.Composite(
+        #         gating_state=ocp.args.StandardRestore(
+        #             item=gating_state
+        #         ),
+        #         theta_state=ocp.args.StandardRestore(
+        #             item=theta_state
+        #         )
+        #     )
+        # )
 
-    # temp = jax.tree.map(lambda x, y: x + jnp.zeros_like(a=y), state['params'], theta_state.params)
-    # theta_state = theta_state.replace(params=temp)
+        # # gating_state = checkpoint.gating_state
+        # theta_state = checkpoint.theta_state
 
-    # temp = jax.tree.map(lambda x, y: x + jnp.zeros_like(a=y), state['batch_stats'], theta_state.batch_stats)
-    # theta_state = theta_state.replace(batch_stats=temp)
+        # del checkpoint
+        state = ckpt_mngr.restore(step=1000, args=ocp.args.StandardRestore())
 
-    # del temp
-    # del state
+    temp = jax.tree.map(lambda x, y: x + jnp.zeros_like(a=y), state['params'], theta_state.params)
+    theta_state = theta_state.replace(params=temp)
+
+    temp = jax.tree.map(lambda x, y: x + jnp.zeros_like(a=y), state['batch_stats'], theta_state.batch_stats)
+    theta_state = theta_state.replace(batch_stats=temp)
+
+    del temp
+    del state
     # endregion
 
     mlflow.set_tracking_uri(uri=cfg.experiment.tracking_uri)
@@ -241,7 +259,7 @@ def main(cfg: DictConfig) -> None:
                     )
                 )
 
-                accuracy, expert_accuracies, coverage, p_z, ece, conf_mat = evaluate(
+                accuracy, expert_accuracies, coverages, p_z, ece, conf_mat = evaluate(
                     dataset=dset_test,
                     gating_state=gating_state,
                     theta_state=theta_state,
@@ -251,7 +269,7 @@ def main(cfg: DictConfig) -> None:
                 metric_dict = {
                     'loss': loss,
                     'accuracy': accuracy,
-                    'coverage': coverage,
+                    'coverage': coverages[len(cfg.dataset.train_files)] / coverages.total(),
                     'ece': ece,
                     'ConfusionMat/TN': conf_mat[0, 0],
                     'ConfusionMat/FP': conf_mat[0, 1],

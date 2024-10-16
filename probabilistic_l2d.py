@@ -1,5 +1,8 @@
 from functools import partial
+from collections import Counter
 import logging
+
+import numpy as np
 
 import jax
 import jax.numpy as jnp
@@ -65,60 +68,27 @@ def create_train_state_batch(state: TrainState) -> TrainState:
     return states
 
 
-def missing_mat_to_missing_tensor(mat: Array) -> Array:
-    """convert a matrix of missing annotations to a tensor
+@jax.jit
+def get_unnorm_log_q_z_tilde(q_uncon: Array, upper: Array, lower: Array) -> Array:
+    """calculate the un-normalised q(z)
 
     Args:
-        mat: a batch-BY-num-expert matrix in which 0 means observed and 1 means missing
+        q_uncon: the posterior of z without any constraints
+        upper: the Lagrange multiplier for the upper constraint
+        lower: the Lagrange multiplier for the lower constraint
 
     Return:
-        out: a batch-BY-num-expert-BY-num-expert tensor in which the last dimension is
-            a vector that is either one-hot or zero vector.
+        log_q: the logarithm of the un-normalised posterior
     """
-    out: Array
-
-    _, num_experts = mat.shape
-
-    # convert from 0-1 to expert's id
-    temp = mat * jnp.arange(start=0, stop=num_experts, step=1)
-    out = jax.nn.one_hot(x=temp, num_classes=num_experts)  # (batch, num_experts, num_experts)
-
-    return out
-
-
-def get_unnorm_q_z_tilde(
-    q_uncon: Array,
-    lmbd_upper: Array,
-    lmbd_lower: Array,
-    lmbd_ij: Array,
-    missing_mat: Array
-) -> Array:
-    """
-    """
-    num_samples, _ = q_uncon.shape
-
-    masks = missing_mat_to_missing_tensor(mat=missing_mat)  # (batch, num_experts + 1, num_experts + 1)
-
-    diag_batch = jax.vmap(fun=jnp.diag, in_axes=0, out_axes=0)
-
-    lmbd_ij = diag_batch(lmbd_ij)  # (batch, num_experts + 1, num_experts + 1)
-
     # calculate log_q_tilde
-    q_den = lmbd_upper - lmbd_lower + 1 \
-        + num_samples * jnp.sum(a=lmbd_ij * masks, axis=-1)
-    q = q_uncon / q_den  # (batch, num_experts + 1)
+    log_q_den = upper - lower + 1
+    log_q = jnp.log(q_uncon) - log_q_den  # (batch, num_experts + 1)
 
-    return q
+    return log_q
 
 
-@partial(jax.jit, static_argnames=('epsilon_ij',))
-def constrained_posterior(
-    q_z_unconstrained: Array,  # (batch, num_experts + 1)
-    epsilon_upper: Array,  # (num_experts + 1,)
-    epsilon_lower: Array,  # (num_experts + 1,)
-    missing_mat: Array,  # (batch, num_experts + 1)
-    epsilon_ij: float
-) -> Array:
+@jax.jit
+def constrained_posterior(q_z_uncon: Array, epsilon_upper: Array, epsilon_lower: Array) -> Array:
     """calculate the work-load balancing posterior
 
     Args:
@@ -141,13 +111,12 @@ def constrained_posterior(
         Returns:
             lagrangian:
         """
-        q_tilde = get_unnorm_q_z_tilde(
-            q_uncon=q_z_unconstrained,
-            lmbd_upper=lmbd['upper'],
-            lmbd_lower=lmbd['lower'],
-            lmbd_ij=lmbd['ij'],
-            missing_mat=missing_mat
+        log_q_tilde = get_unnorm_log_q_z_tilde(
+            q_uncon=q_z_uncon,
+            upper=lmbd['upper'],
+            lower=lmbd['lower']
         )
+        q_tilde = jnp.exp(log_q_tilde)
 
         # calculate Lagrangian
         lgr = jnp.sum(a=q_tilde, axis=-1)  # (batch,)
@@ -156,35 +125,30 @@ def constrained_posterior(
         lgr = lgr + jnp.sum(a=lmbd['upper'] * epsilon_upper, axis=0)
         lgr = lgr - jnp.sum(a=lmbd['lower'] * epsilon_lower, axis=0)
 
-        lgr = lgr + epsilon_ij * jnp.sum(a=lmbd['ij'] * missing_mat)
-
         return lgr
 
     pg = ProjectedGradient(
         fun=duality_Lagrangian,
         projection=projection_non_negative,
-        implicit_diff=False,
-        tol=1e-4
+        implicit_diff=False
     )
     pg_sol = pg.run(
         init_params=dict(
             upper=jnp.ones_like(a=epsilon_upper, dtype=jnp.float32),
-            lower=jnp.ones_like(a=epsilon_lower, dtype=jnp.float32),
-            ij=0.1 * jnp.ones_like(a=missing_mat, dtype=jnp.float32)
+            lower=jnp.ones_like(a=epsilon_lower, dtype=jnp.float32)
         )
     )
     lmbd = pg_sol.params  # (num_experts,)  <== need to check
 
-    q_z = get_unnorm_q_z_tilde(
-        q_uncon=q_z_unconstrained,
-        lmbd_upper=lmbd['upper'],
-        lmbd_lower=lmbd['lower'],
-        lmbd_ij=lmbd['ij'],
-        missing_mat=missing_mat
+    log_q_z = get_unnorm_log_q_z_tilde(
+        q_uncon=q_z_uncon,
+        upper=lmbd['upper'],
+        lower=lmbd['lower']
     )
 
     # normalisation
-    q_z /= jnp.sum(a=q_z, axis=-1, keepdims=True)
+    log_q_z -= jax.nn.logsumexp(a=log_q_z, axis=-1, keepdims=True)
+    q_z = jnp.exp(log_q_z)
 
     return q_z
 
@@ -297,7 +261,6 @@ def expectation_maximisation(
         x=annotations,
         num_classes=cfg.dataset.num_classes
     )  # (batch, num_experts + 1, num_classes)
-    missing_mat = (annotations == -1) * 1  # (batch, num_experts + 1)
 
     def variational_free_energy(
         gating_params: FrozenDict,
@@ -346,11 +309,9 @@ def expectation_maximisation(
         )  # (num_epxerts + 1,)
 
         q_z_con = constrained_posterior(
-            q_z_unconstrained=q_z,
+            q_z_uncon=q_z,
             epsilon_upper=epsilon_upper,
-            epsilon_lower=epsilon_lower,
-            missing_mat=missing_mat,
-            epsilon_ij=cfg.hparams.epsilon_ij
+            epsilon_lower=epsilon_lower
         )
         # endregion
 
@@ -485,7 +446,7 @@ def evaluate(
     gating_state: TrainState,
     theta_state: TrainState,
     cfg: DictConfig
-) -> tuple[Scalar, Scalar, list[Scalar], Scalar, Array, Array]:
+) -> tuple[float, list[float], Counter, list[float], float, Array]:
     """evaluate performance on a dataset
 
     Args:
@@ -496,7 +457,8 @@ def evaluate(
 
     Returns:
         accuracy: prediction accuracy of l2d
-        coverage:
+        expert_accuracies: list of expert accuracy
+        coverages: a counter counting the number of samples predicted by each expert
         p_z: average output of the gating model, Pr(z | x, gamma)
         ece: expected calibration error
         conf_mat: confusion matrix for the gating model w.r.t. the classifier. In other
@@ -521,7 +483,7 @@ def evaluate(
     p_z_accum = [metrics.Average() for _ in range(len(cfg.dataset.test_files) + 1)]
     accuracy_accum = metrics.Accuracy()
     expert_accuracies = [metrics.Accuracy() for _ in range(len(cfg.dataset.test_files) + 1)]
-    coverage = metrics.Average()
+    coverages = Counter()
     preds_accum = []  # store prediction to calculate ECE
     labels_true = []
 
@@ -560,9 +522,7 @@ def evaluate(
 
         selected_expert_ids = jnp.argmax(a=logits_p_z, axis=-1)  # (batch_size,)
 
-        # coverage
-        coverage_flag = (selected_expert_ids == len(cfg.dataset.test_files)) * 1
-        coverage.update(values=coverage_flag)
+        coverages.update(np.asarray(a=selected_expert_ids, dtype=np.int32))
 
         # accuracy
         logits_p_t = expert_prediction_step(x=x, theta_state=theta_state)
@@ -604,7 +564,7 @@ def evaluate(
     return (
         accuracy_accum.compute(),
         [expert_accuracy.compute() for expert_accuracy in expert_accuracies],
-        coverage.compute(),
+        coverages,
         [p_z.compute() for p_z in p_z_accum],
         ece,
         conf_mat
