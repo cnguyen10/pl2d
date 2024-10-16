@@ -11,16 +11,16 @@ dataset:
     - ${dataset.root}/synthetic_expert/train_0_1_2_3_4_5_6_7_8_9_${dataset.missing_rate}.json
     - ${dataset.root}/synthetic_expert/train_10_11_12_13_14_15_16_17_18_19_${dataset.missing_rate}.json
   train_complete_files:
-    - ${dataset.root}/synthetic_expert/label_noise_9_train_0.25.json
-    - ${dataset.root}/synthetic_expert/label_noise_51_train_0.25.json
-    # - ${dataset.root}/synthetic_expert/train_0_1_2_3_4_5_6_7_8_9.json
-    # - ${dataset.root}/synthetic_expert/train_10_11_12_13_14_15_16_17_18_19.json
+    # - ${dataset.root}/synthetic_expert/label_noise_9_train_0.25.json
+    # - ${dataset.root}/synthetic_expert/label_noise_51_train_0.25.json
+    - ${dataset.root}/synthetic_expert/train_0_1_2_3_4_5_6_7_8_9.json
+    - ${dataset.root}/synthetic_expert/train_10_11_12_13_14_15_16_17_18_19.json
   train_ground_truth_file: ${dataset.root}/train.json
   test_files:
-    - ${dataset.root}/synthetic_expert/label_noise_9_test_0.25.json
-    - ${dataset.root}/synthetic_expert/label_noise_51_test_0.25.json
-    # - ${dataset.root}/synthetic_expert/test_0_1_2_3_4_5_6_7_8_9.json
-    # - ${dataset.root}/synthetic_expert/test_10_11_12_13_14_15_16_17_18_19.json
+    # - ${dataset.root}/synthetic_expert/label_noise_9_test_0.25.json
+    # - ${dataset.root}/synthetic_expert/label_noise_51_test_0.25.json
+    - ${dataset.root}/synthetic_expert/test_0_1_2_3_4_5_6_7_8_9.json
+    - ${dataset.root}/synthetic_expert/test_10_11_12_13_14_15_16_17_18_19.json
   test_ground_truth_file: ${dataset.root}/test.json
   resized_shape: null
   crop_size: [32, 32]
@@ -30,6 +30,5 @@ model:
   _target_: models.PreActResNet.ResNet18
 
 hparams:
-  Dirichlet_concentration: [1., 1., 1.]
   epsilon_lower: [0., 0., 0.]
   epsilon_upper: [1., 1., 0.2]

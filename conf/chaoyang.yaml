@@ -25,6 +25,5 @@ model:
   _target_: models.ResNet.resnet18
 
 hparams:
-  Dirichlet_concentration: [1., 1., 1.]
   epsilon_lower: [0., 0., 0.]
   epsilon_upper: [1., 1., 0.2]

@@ -124,11 +124,7 @@ def constrained_posterior(
     return log_q_z
 
 
-@partial(
-    jax.jit,
-    static_argnames=('num_classes', 'num_experts', 'num_iterations'),
-    # device=jax.devices()[-1]
-)
+@partial(jax.jit, static_argnames=('num_classes', 'num_experts', 'num_iterations'))
 def unconstrained_posteriors(
     log_p_z_x: Array,  # (batch, num_experts + 1)
     log_p_t_x: Array,  # (batch, num_experts + 1, num_classes)
@@ -209,31 +205,10 @@ def unconstrained_posteriors(
         init_val={'z': q_z, 't': q_t}
     )
 
-    # # fixed-point iteration
-    # for _ in range(num_iterations):
-    #     log_q_z = log_p_z_x + jnp.sum(a=q_t * log_p_y_t[:, None, :], axis=-1) - 1  # (batch, num_experts + 1,)
-    #     log_q_z -= jax.nn.logsumexp(a=log_q_z, axis=-1, keepdims=True)  # normalise
-
-    #     q_z_new = jnp.exp(log_q_z)  # (batch, num_experts + 1,)
-    #     q_t_one_out = q_t_one_row_out_fn(q_t, q_t_ids)  # (batch, num_experts + 1, num_experts, num_classes)
-    #     log_q_t = log_p_t_x + jnp.sum(a=q_z[:, :, None, None] * q_t_one_out * log_p_y_t[:, None, None, :], axis=-2) - 1  # (batch, num_experts + 1, num_classes)
-    #     log_q_t -= jax.nn.logsumexp(a=log_q_t, axis=-1, keepdims=True)
-    #     q_t = jnp.exp(log_q_t)
-
-    #     q_t = q_t * jnp.expand_dims(a=missing_vec, axis=-1) \
-    #         + (1 - jnp.expand_dims(a=missing_vec, axis=-1)) * t_one_hot  # (batch, num_experts + 1, num_classes)
-    #     q_z = q_z_new
-    # # endregion
-
     return q_new['z'], q_new['t']
 
 
-@partial(
-    jax.jit,
-    static_argnames=('cfg',),
-    donate_argnames=('gating_state', 'theta_state')
-    # device=jax.devices()[-1]
-)
+@partial(jax.jit, static_argnames=('cfg',), donate_argnames=('gating_state', 'theta_state'))
 def expectation_maximisation(
     x: Array,
     y: Array,
@@ -252,21 +227,11 @@ def expectation_maximisation(
     )  # (batch, num_experts + 1)
     masks = jnp.expand_dims(a=masks, axis=-1)  # (batch, num_experts + 1, 1)
 
-    annotations = jnp.concatenate(
-        arrays=(t, y[:, None]),
-        axis=-1
-    )  # (batch, num_experts + 1)
-    missing_mat = (annotations == -1) * 1  # (batch, num_experts + 1)
+    annotations = jnp.concatenate(arrays=(t, y[:, None]), axis=-1)  # (batch, num_experts + 1)
     annotations_one_hot = jax.nn.one_hot(
-        x=annotations * (1 - missing_mat),
+        x=annotations,
         num_classes=cfg.dataset.num_classes
     )  # (batch, num_experts + 1, num_classes)
-
-    # set prior parameter
-    dir_params = jnp.array(
-        object=cfg.hparams.Dirichlet_concentration,
-        dtype=jnp.float32
-    )  # (num_experts,)
 
     def variational_free_energy(
         gating_params: FrozenDict,
@@ -288,8 +253,8 @@ def expectation_maximisation(
             x,
             True
         )
+        logits_t_x = jnp.swapaxes(a=logits_t_x, axis1=0, axis2=1)  # (batch, num_experts + 1, num_classes)
         log_p_t_x = jax.nn.log_softmax(x=logits_t_x, axis=-1)  # (num_experts + 1, batch, num_classes)
-        log_p_t_x = jnp.swapaxes(a=log_p_t_x, axis1=0, axis2=1)  # (batch, num_experts + 1, num_classes)
 
         # region E STEP
         q_z, q_t = jax.lax.stop_gradient(
@@ -323,16 +288,20 @@ def expectation_maximisation(
 
         # q_t for classifier is the ground truth labels
         q_t = q_t * (1 - masks) + masks * annotations_one_hot
-        loss_t = -jnp.sum(a=q_t * log_p_t_x, axis=(-1, -2))  # (batch,)
+        loss_t = optax.losses.softmax_cross_entropy(
+            logits=logits_t_x,
+            labels=q_t
+        )  # (batch, num_experts + 1)
+        loss_t = jnp.sum(a=loss_t, axis=-1)  # (batch,)
+        loss_t = jnp.mean(a=loss_t, axis=0)
 
-        loss_z = -jnp.sum(a=jnp.exp(log_q_z) * log_p_z_x, axis=-1)  # (batch,)
-        loss = jnp.mean(a=loss_t + loss_z, axis=0)
+        loss_z = optax.losses.softmax_cross_entropy(
+            logits=logits_z_x,
+            labels=jnp.exp(log_q_z)
+        )
+        loss_z = jnp.mean(a=loss_z)
 
-        # prior
-        log_avg_p_z_x = jnp.mean(a=log_p_z_x, axis=0)
-        loss_prior = -jnp.sum((dir_params - 1) * log_avg_p_z_x, axis=0)
-
-        loss = loss + cfg.training.batch_size / cfg.dataset.length * loss_prior
+        loss = loss_t + loss_z
 
         return loss, (batch_stats_gating, batch_stats_theta, log_p_z_x)
 

@@ -1,5 +1,5 @@
 defaults:
-  - ??? # cifar100, chaoyang, micebone or nihao in the same folder
+  - cifar100 # cifar100, chaoyang, micebone or nihao in the same folder
   - override hydra/hydra_logging: disabled  
   - override hydra/job_logging: disabled
   - _self_
@@ -21,15 +21,15 @@ hparams:
   std: null
 
 training:
-  gating_lr: 0.01
-  expert_lr: 0.01
+  gating_lr: 0.025
+  expert_lr: 0.05
   num_fixed_point_iterations: 10
   batch_size: 128
   num_epochs: 300
 
 data_loading:
   progress_bar: True
-  num_threads: 2
+  num_threads: 4
   prefetch_size: 8
 
 jax:

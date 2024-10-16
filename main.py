@@ -6,7 +6,7 @@ from functools import partial
 from tqdm import tqdm
 
 import hydra
-from omegaconf import DictConfig, OmegaConf, open_dict
+from omegaconf import DictConfig, OmegaConf
 import flatdict
 
 import jax
@@ -64,12 +64,6 @@ def main(cfg: DictConfig) -> None:
         root=cfg.dataset.root,
         shape=cfg.dataset.resized_shape
     )
-
-    # store dataset length to reweight prior
-    cfg = OmegaConf.create(obj=cfg)
-    OmegaConf.set_struct(conf=cfg, value=True)
-    with open_dict(config=cfg):
-        cfg.dataset.length = len(dset_train)
     # endregion
 
     # region MODELS
@@ -235,18 +229,17 @@ def main(cfg: DictConfig) -> None:
                     cfg=cfg
                 )
 
-                # un-comment the following to enable model saving
-                # # wait until completing the asynchronous saving
-                # ckpt_mngr.wait_until_finished()
+                # wait until completing the asynchronous saving
+                ckpt_mngr.wait_until_finished()
 
-                # # save parameters asynchronously
-                # ckpt_mngr.save(
-                #     step=epoch_id + 1,
-                #     args=ocp.args.Composite(
-                #         gating_state=ocp.args.StandardSave(gating_state),
-                #         theta_state=ocp.args.StandardSave(theta_state)
-                #     )
-                # )
+                # save parameters asynchronously
+                ckpt_mngr.save(
+                    step=epoch_id + 1,
+                    args=ocp.args.Composite(
+                        gating_state=ocp.args.StandardSave(gating_state),
+                        theta_state=ocp.args.StandardSave(theta_state)
+                    )
+                )
 
                 accuracy, expert_accuracies, coverage, p_z, ece, conf_mat = evaluate(
                     dataset=dset_test,
