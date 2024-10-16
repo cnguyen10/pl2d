@@ -65,11 +65,59 @@ def create_train_state_batch(state: TrainState) -> TrainState:
     return states
 
 
-@jax.jit
+def missing_mat_to_missing_tensor(mat: Array) -> Array:
+    """convert a matrix of missing annotations to a tensor
+
+    Args:
+        mat: a batch-BY-num-expert matrix in which 0 means observed and 1 means missing
+
+    Return:
+        out: a batch-BY-num-expert-BY-num-expert tensor in which the last dimension is
+            a vector that is either one-hot or zero vector.
+    """
+    out: Array
+
+    _, num_experts = mat.shape
+
+    # convert from 0-1 to expert's id
+    temp = mat * jnp.arange(start=0, stop=num_experts, step=1)
+    out = jax.nn.one_hot(x=temp, num_classes=num_experts)  # (batch, num_experts, num_experts)
+
+    return out
+
+
+def get_unnorm_q_z_tilde(
+    q_uncon: Array,
+    lmbd_upper: Array,
+    lmbd_lower: Array,
+    lmbd_ij: Array,
+    missing_mat: Array
+) -> Array:
+    """
+    """
+    num_samples, _ = q_uncon.shape
+
+    masks = missing_mat_to_missing_tensor(mat=missing_mat)  # (batch, num_experts + 1, num_experts + 1)
+
+    diag_batch = jax.vmap(fun=jnp.diag, in_axes=0, out_axes=0)
+
+    lmbd_ij = diag_batch(lmbd_ij)  # (batch, num_experts + 1, num_experts + 1)
+
+    # calculate log_q_tilde
+    q_den = lmbd_upper - lmbd_lower + 1 \
+        + num_samples * jnp.sum(a=lmbd_ij * masks, axis=-1)
+    q = q_uncon / q_den  # (batch, num_experts + 1)
+
+    return q
+
+
+@partial(jax.jit, static_argnames=('epsilon_ij',))
 def constrained_posterior(
-    log_q_z_unconstrained: Array,  # (batch, num_experts + 1)
+    q_z_unconstrained: Array,  # (batch, num_experts + 1)
     epsilon_upper: Array,  # (num_experts + 1,)
     epsilon_lower: Array,  # (num_experts + 1,)
+    missing_mat: Array,  # (batch, num_experts + 1)
+    epsilon_ij: float
 ) -> Array:
     """calculate the work-load balancing posterior
 
@@ -81,27 +129,36 @@ def constrained_posterior(
     Returns:
         log_q_z: the constrained posterior of z
     """
-    num_samples = log_q_z_unconstrained.shape[0]
-
-    def duality_Lagrangian(lmbd_params: dict[str, Array]) -> Scalar:
+    def duality_Lagrangian(lmbd: dict[str, Array]) -> Scalar:
         """the duality of Lagrangian to find the Lagrange multiplier
 
         Args:
-            lmbd_params: a dictionary containing the Lagrange multiplier for the lower
-                and upper cases
+            lmbd: a dictionary containing the Lagrange multiplier with the following keys:
+                - upper: corresponds to epsilon upper  # (num_experts + 1,)
+                - lower: epsilon lower  # (num_experts + 1,)
+                - ij: epsilon ij  # (batch, num_experts + 1)
 
         Returns:
             lagrangian:
         """
-        lagrangian = jax.nn.logsumexp(
-            a=log_q_z_unconstrained - lmbd_params['lmbd_upper'] + lmbd_params['lmbd_lower'] - 1,
-            axis=(0, 1)
-        )  # scalar
-        lagrangian = jnp.exp(lagrangian - jnp.log(num_samples))
-        lagrangian = lagrangian + jnp.sum(a=lmbd_params['lmbd_upper'] * epsilon_upper, axis=0)
-        lagrangian = lagrangian - jnp.sum(a=lmbd_params['lmbd_lower'] * epsilon_lower, axis=0)
+        q_tilde = get_unnorm_q_z_tilde(
+            q_uncon=q_z_unconstrained,
+            lmbd_upper=lmbd['upper'],
+            lmbd_lower=lmbd['lower'],
+            lmbd_ij=lmbd['ij'],
+            missing_mat=missing_mat
+        )
 
-        return lagrangian
+        # calculate Lagrangian
+        lgr = jnp.sum(a=q_tilde, axis=-1)  # (batch,)
+        lgr = jnp.mean(a=lgr, axis=0)
+
+        lgr = lgr + jnp.sum(a=lmbd['upper'] * epsilon_upper, axis=0)
+        lgr = lgr - jnp.sum(a=lmbd['lower'] * epsilon_lower, axis=0)
+
+        lgr = lgr + epsilon_ij * jnp.sum(a=lmbd['ij'] * missing_mat)
+
+        return lgr
 
     pg = ProjectedGradient(
         fun=duality_Lagrangian,
@@ -109,19 +166,27 @@ def constrained_posterior(
         implicit_diff=False,
         tol=1e-4
     )
-    pg_sol = pg.run(init_params=dict(
-        lmbd_upper=jnp.ones_like(a=epsilon_upper),
-        lmbd_lower=0.1 * jnp.ones_like(a=epsilon_lower)
+    pg_sol = pg.run(
+        init_params=dict(
+            upper=jnp.ones_like(a=epsilon_upper, dtype=jnp.float32),
+            lower=jnp.ones_like(a=epsilon_lower, dtype=jnp.float32),
+            ij=0.1 * jnp.ones_like(a=missing_mat, dtype=jnp.float32)
         )
     )
-    lmbd_params = pg_sol.params  # (num_experts,)  <== need to check
+    lmbd = pg_sol.params  # (num_experts,)  <== need to check
 
-    log_q_z = log_q_z_unconstrained - lmbd_params['lmbd_upper'] + lmbd_params['lmbd_lower'] - 1
+    q_z = get_unnorm_q_z_tilde(
+        q_uncon=q_z_unconstrained,
+        lmbd_upper=lmbd['upper'],
+        lmbd_lower=lmbd['lower'],
+        lmbd_ij=lmbd['ij'],
+        missing_mat=missing_mat
+    )
 
     # normalisation
-    log_q_z -= jax.nn.logsumexp(a=log_q_z, axis=-1, keepdims=True)
+    q_z /= jnp.sum(a=q_z, axis=-1, keepdims=True)
 
-    return log_q_z
+    return q_z
 
 
 @partial(jax.jit, static_argnames=('num_classes', 'num_experts', 'num_iterations'))
@@ -232,6 +297,7 @@ def expectation_maximisation(
         x=annotations,
         num_classes=cfg.dataset.num_classes
     )  # (batch, num_experts + 1, num_classes)
+    missing_mat = (annotations == -1) * 1  # (batch, num_experts + 1)
 
     def variational_free_energy(
         gating_params: FrozenDict,
@@ -279,26 +345,22 @@ def expectation_maximisation(
             dtype=jnp.float32
         )  # (num_epxerts + 1,)
 
-        log_q_z = constrained_posterior(
-            log_q_z_unconstrained=jnp.log(q_z),
+        q_z_con = constrained_posterior(
+            q_z_unconstrained=q_z,
             epsilon_upper=epsilon_upper,
-            epsilon_lower=epsilon_lower
+            epsilon_lower=epsilon_lower,
+            missing_mat=missing_mat,
+            epsilon_ij=cfg.hparams.epsilon_ij
         )
         # endregion
 
         # q_t for classifier is the ground truth labels
         q_t = q_t * (1 - masks) + masks * annotations_one_hot
-        loss_t = optax.losses.softmax_cross_entropy(
-            logits=logits_t_x,
-            labels=q_t
-        )  # (batch, num_experts + 1)
+        loss_t = optax.losses.softmax_cross_entropy(logits=logits_t_x, labels=q_t)
         loss_t = jnp.sum(a=loss_t, axis=-1)  # (batch,)
         loss_t = jnp.mean(a=loss_t, axis=0)
 
-        loss_z = optax.losses.softmax_cross_entropy(
-            logits=logits_z_x,
-            labels=jnp.exp(log_q_z)
-        )
+        loss_z = optax.losses.softmax_cross_entropy(logits=logits_z_x, labels=q_z_con)
         loss_z = jnp.mean(a=loss_z)
 
         loss = loss_t + loss_z
