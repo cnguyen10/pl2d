@@ -69,19 +69,20 @@ def create_train_state_batch(state: TrainState) -> TrainState:
 
 
 @jax.jit
-def get_unnorm_log_q_z_tilde(q_uncon: Array, upper: Array, lower: Array) -> Array:
+def get_unnorm_log_q_z_tilde(q_uncon: Array, params: dict[str, Array]) -> Array:
     """calculate the un-normalised q(z)
 
     Args:
         q_uncon: the posterior of z without any constraints
-        upper: the Lagrange multiplier for the upper constraint
-        lower: the Lagrange multiplier for the lower constraint
+        params: a tree-like or dictionary containing the Lagrange multipliers
+            - upper:
+            - lower:
 
     Return:
         log_q: the logarithm of the un-normalised posterior
     """
     # calculate log_q_tilde
-    log_q_den = upper - lower + 1
+    log_q_den = params['upper'] - params['lower'] + 1
     log_q = jnp.log(q_uncon) - log_q_den  # (batch, num_experts + 1)
 
     return log_q
@@ -99,7 +100,7 @@ def constrained_posterior(q_z_uncon: Array, epsilon_upper: Array, epsilon_lower:
     Returns:
         log_q_z: the constrained posterior of z
     """
-    def duality_Lagrangian(lmbd: dict[str, Array]) -> Scalar:
+    def duality_Lagrangian(params: dict[str, Array]) -> Scalar:
         """the duality of Lagrangian to find the Lagrange multiplier
 
         Args:
@@ -111,40 +112,26 @@ def constrained_posterior(q_z_uncon: Array, epsilon_upper: Array, epsilon_lower:
         Returns:
             lagrangian:
         """
-        log_q_tilde = get_unnorm_log_q_z_tilde(
-            q_uncon=q_z_uncon,
-            upper=lmbd['upper'],
-            lower=lmbd['lower']
-        )
-        q_tilde = jnp.exp(log_q_tilde)
+        log_q_tilde = get_unnorm_log_q_z_tilde(q_uncon=q_z_uncon, params=params)
 
         # calculate Lagrangian
-        lgr = jnp.sum(a=q_tilde, axis=-1)  # (batch,)
+        lgr = jax.nn.logsumexp(a=log_q_tilde, axis=-1)
         lgr = jnp.mean(a=lgr, axis=0)
 
-        lgr = lgr + jnp.sum(a=lmbd['upper'] * epsilon_upper, axis=0)
-        lgr = lgr - jnp.sum(a=lmbd['lower'] * epsilon_lower, axis=0)
+        lgr = lgr + jnp.sum(a=params['upper'] * epsilon_upper, axis=0)
+        lgr = lgr - jnp.sum(a=params['lower'] * epsilon_lower, axis=0)
 
         return lgr
 
-    pg = ProjectedGradient(
-        fun=duality_Lagrangian,
-        projection=projection_non_negative,
-        implicit_diff=False
+    init_params = dict(
+        upper=jnp.zeros_like(a=epsilon_upper, dtype=jnp.float32),
+        lower=jnp.zeros_like(a=epsilon_lower, dtype=jnp.float32)
     )
-    pg_sol = pg.run(
-        init_params=dict(
-            upper=jnp.ones_like(a=epsilon_upper, dtype=jnp.float32),
-            lower=jnp.ones_like(a=epsilon_lower, dtype=jnp.float32)
-        )
-    )
-    lmbd = pg_sol.params  # (num_experts,)  <== need to check
 
-    log_q_z = get_unnorm_log_q_z_tilde(
-        q_uncon=q_z_uncon,
-        upper=lmbd['upper'],
-        lower=lmbd['lower']
-    )
+    pg = ProjectedGradient(fun=duality_Lagrangian, projection=projection_non_negative)
+    res = pg.run(init_params=init_params)
+
+    log_q_z = get_unnorm_log_q_z_tilde(q_uncon=q_z_uncon, params=res.params)
 
     # normalisation
     log_q_z -= jax.nn.logsumexp(a=log_q_z, axis=-1, keepdims=True)
