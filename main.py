@@ -82,7 +82,8 @@ def main(cfg: DictConfig) -> None:
         lr=cfg.training.gating_lr,
         batch_size=cfg.training.batch_size,
         num_epochs=cfg.training.num_epochs,
-        key=jax.random.key(seed=random.randint(a=0, b=10_000))
+        key=jax.random.key(seed=random.randint(a=0, b=10_000)),
+        max_norm=cfg.hparams.clipped_norm
     )
 
     # parameter of annotators
@@ -97,7 +98,8 @@ def main(cfg: DictConfig) -> None:
         num_training_samples=len(dset_train),
         lr=cfg.training.expert_lr,
         batch_size=cfg.training.batch_size,
-        num_epochs=cfg.training.num_epochs
+        num_epochs=cfg.training.num_epochs,
+        max_norm=cfg.hparams.clipped_norm
     )
     init_resnet_fn_batch = jax.vmap(fun=init_resnet_fn, in_axes=0, out_axes=0)
     keys = jax.vmap(fun=jax.random.key, in_axes=0, out_axes=0)(
