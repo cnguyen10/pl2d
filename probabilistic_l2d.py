@@ -69,7 +69,7 @@ def create_train_state_batch(state: TrainState) -> TrainState:
 
 
 @jax.jit
-def get_unnorm_log_q_z_tilde(q_uncon: Array, params: dict[str, Array], missing_mat: Array) -> Array:
+def get_unnorm_log_q_z_tilde(q_uncon: Array, params: dict[str, Array]) -> Array:
     """calculate the un-normalised q(z)
 
     Args:
@@ -81,27 +81,18 @@ def get_unnorm_log_q_z_tilde(q_uncon: Array, params: dict[str, Array], missing_m
     Return:
         log_q: the logarithm of the un-normalised posterior
     """
-    num_samples, _ = q_uncon.shape
-
-    diag_batch = jax.vmap(fun=jnp.diag, in_axes=0, out_axes=0)
-    lmbd_ij = diag_batch(params['ij'])  # (batch, num_experts + 1, num_experts + 1)
-
-    masks = diag_batch(missing_mat)
-
     # calculate log_q_tilde
-    log_q_den = params['upper'] - params['lower'] + 1 + num_samples * jnp.sum(a=lmbd_ij * masks, axis=-1)
+    log_q_den = params['upper'] - params['lower'] + 1
     log_q = jnp.log(q_uncon) - log_q_den  # (batch, num_experts + 1)
 
     return log_q
 
 
-@partial(jax.jit, static_argnames=('epsilon_ij',))
+@jax.jit
 def constrained_posterior(
     q_z_uncon: Array,
     epsilon_upper: Array,
-    epsilon_lower: Array,
-    missing_mat: Array,
-    epsilon_ij: float,
+    epsilon_lower: Array
 ) -> Array:
     """calculate the work-load balancing posterior
 
@@ -125,7 +116,7 @@ def constrained_posterior(
         Returns:
             lagrangian:
         """
-        log_q_tilde = get_unnorm_log_q_z_tilde(q_uncon=q_z_uncon, params=params, missing_mat=missing_mat)
+        log_q_tilde = get_unnorm_log_q_z_tilde(q_uncon=q_z_uncon, params=params)
 
         # calculate Lagrangian
         lgr = jax.nn.logsumexp(a=log_q_tilde, axis=-1)
@@ -134,20 +125,17 @@ def constrained_posterior(
         lgr = lgr + jnp.sum(a=params['upper'] * epsilon_upper, axis=0)
         lgr = lgr - jnp.sum(a=params['lower'] * epsilon_lower, axis=0)
 
-        lgr = lgr + epsilon_ij * jnp.sum(a=params['ij'] * missing_mat)
-
         return lgr
 
     init_params = dict(
         upper=jnp.zeros_like(a=epsilon_upper, dtype=jnp.float32),
-        lower=jnp.zeros_like(a=epsilon_lower, dtype=jnp.float32),
-        ij=jnp.zeros_like(a=missing_mat, dtype=jnp.float32)
+        lower=jnp.zeros_like(a=epsilon_lower, dtype=jnp.float32)
     )
 
     pg = ProjectedGradient(fun=duality_Lagrangian, projection=projection_non_negative)
     res = pg.run(init_params=init_params)
 
-    log_q_z = get_unnorm_log_q_z_tilde(q_uncon=q_z_uncon, params=res.params, missing_mat=missing_mat)
+    log_q_z = get_unnorm_log_q_z_tilde(q_uncon=q_z_uncon, params=res.params)
 
     # normalisation
     log_q_z -= jax.nn.logsumexp(a=log_q_z, axis=-1, keepdims=True)
@@ -265,9 +253,6 @@ def expectation_maximisation(
         num_classes=cfg.dataset.num_classes
     )  # (batch, num_experts + 1, num_classes)
 
-    # matrix represents missing annotations
-    missing_mat = (annotations == -1) * 1  # (batch, num_experts + 1)
-
     def variational_free_energy(
         gating_params: FrozenDict,
         theta_params: FrozenDict
@@ -318,8 +303,6 @@ def expectation_maximisation(
             q_z_uncon=q_z,
             epsilon_upper=epsilon_upper,
             epsilon_lower=epsilon_lower,
-            missing_mat=missing_mat,
-            epsilon_ij=cfg.hparams.epsilon_ij
         )
         # endregion
 
