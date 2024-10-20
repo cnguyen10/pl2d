@@ -1,0 +1,37 @@
+defaults:
+  - cifar100 # cifar100, chaoyang, micebone or nihao in the same folder
+  - override hydra/hydra_logging: disabled  
+  - override hydra/job_logging: disabled
+  - _self_
+  
+hydra:  
+  output_subdir: null  
+  run:  
+    dir: .
+
+experiment:
+  name: L2D - MoE
+  tracking_uri: sqlite:///PL2D.db
+  logdir: ./logdir
+  run_id: null
+
+hparams:
+  prob_random_h_flip: 0.5
+  mean: null
+  std: null
+
+training:
+  gating_lr: 0.01
+  expert_lr: 0.01
+  batch_size: 128
+  num_epochs: 300
+
+data_loading:
+  progress_bar: True
+  num_threads: 4
+  prefetch_size: 8
+
+jax:
+  platform: cuda
+  mem: 0.9
+  disable_jit: False
