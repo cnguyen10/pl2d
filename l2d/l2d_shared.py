@@ -2,15 +2,12 @@ import os
 from pathlib import Path
 import random
 from functools import partial
-from collections import Counter
 
 from tqdm import tqdm
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
 import flatdict
-
-import numpy as np
 
 import jax
 import jax.numpy as jnp
@@ -180,7 +177,11 @@ def prediction_step(x: Array, state: TrainState) -> Array:
     return logits_p_z
 
 
-def evaluate(dataset: dx._c.Buffer, state: TrainState, cfg: DictConfig) -> tuple[Scalar, Counter, list[Array]]:
+def evaluate(
+    dataset: dx._c.Buffer,
+    state: TrainState,
+    cfg: DictConfig
+) -> tuple[Scalar, Scalar, list[Array], Scalar]:
     """calculate the average cluster probability vector
 
     Args:
@@ -203,7 +204,8 @@ def evaluate(dataset: dx._c.Buffer, state: TrainState, cfg: DictConfig) -> tuple
 
     p_z_accum = [metrics.Average() for _ in range(len(cfg.dataset.train_files) + 1)]
     accuracy_accum = metrics.Accuracy()
-    coverages = Counter()
+    coverage = metrics.Average()
+    clf_accuracy_accum = metrics.Accuracy()
 
     for samples in tqdm(
         iterable=dset,
@@ -233,7 +235,7 @@ def evaluate(dataset: dx._c.Buffer, state: TrainState, cfg: DictConfig) -> tuple
 
         selected_expert_ids = jnp.argmax(a=logits_p_z, axis=-1)  # (batch,)
 
-        coverages.update(np.asarray(a=selected_expert_ids, dtype=np.int32))
+        coverage.update(values=(selected_expert_ids == len(cfg.dataset.test_files)) * 1)
 
         # accuracy
         logits_p_y_x_theta = logits[:, :cfg.dataset.num_classes]
@@ -243,11 +245,13 @@ def evaluate(dataset: dx._c.Buffer, state: TrainState, cfg: DictConfig) -> tuple
         )  # (batch, num_experts + 1, num_classes)
         queried_predictions = human_and_model_predictions[jnp.arange(len(x)), selected_expert_ids, :]
         accuracy_accum.update(logits=queried_predictions, labels=y)
+        clf_accuracy_accum.update(logits=logits_p_y_x_theta, labels=y)
 
     return (
         accuracy_accum.compute(),
-        coverages,
-        [p_z.compute() for p_z in p_z_accum]
+        coverage.compute(),
+        [p_z.compute() for p_z in p_z_accum],
+        clf_accuracy_accum.compute()
     )
 
 
@@ -377,7 +381,7 @@ def main(cfg: DictConfig) -> None:
                     cfg=cfg
                 )
 
-                accuracy, coverages, p_z = evaluate(
+                accuracy, coverage, p_z, clf_accuracy = evaluate(
                     dataset=dset_test,
                     state=state,
                     cfg=cfg
@@ -397,7 +401,8 @@ def main(cfg: DictConfig) -> None:
                 metric_dict = dict(
                     loss=loss,
                     accuracy=accuracy,
-                    coverage=coverages[len(cfg.dataset.train_files)] / coverages.total()
+                    coverage=coverage,
+                    clf_accuracy=clf_accuracy
                 )
 
                 for i in range(len(p_z)):
