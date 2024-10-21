@@ -39,17 +39,12 @@ from utils import (
 from probabilistic_l2d import constrained_posterior
 
 
-@partial(
-    jax.jit,
-    static_argnames=('cfg',),
-    donate_argnames=('gating_state', 'theta_state')
-)
+@partial(jax.jit, static_argnames=('cfg',), donate_argnames=('state',))
 def train_step(
     x: Array,
     y: Array,
     t: Array,
-    gating_state: TrainState,
-    theta_state: TrainState,
+    state: TrainState,
     cfg: DictConfig
 ) -> tuple[TrainState, TrainState, Scalar]:
     """
@@ -57,20 +52,18 @@ def train_step(
     t_one_hot = jax.nn.one_hot(x=t, num_classes=cfg.dataset.num_classes)
     t_one_hot = optax.smooth_labels(labels=t_one_hot, alpha=0.01)
 
-
-    def loss_function(
-        gating_params: FrozenDict,
-        theta_params: FrozenDict
-    ) -> tuple[Scalar, tuple[FrozenDict, FrozenDict]]:
+    def loss_function(params: FrozenDict,) -> tuple[Scalar, FrozenDict]:
         """
         """
         # prediction of classifier Pr(t | x, theta)
-        logits_clf, theta_batch_stats = theta_state.apply_fn(
-            variables={'params': theta_params, 'batch_stats': theta_state.batch_stats},
+        logits, batch_stats = state.apply_fn(
+            variables={'params': params, 'batch_stats': state.batch_stats},
             x=x,
             train=True,
             mutable=['batch_stats']
-        )  # (batch, num_classes)
+        )
+        logits_clf = logits[:, :cfg.dataset.num_classes]
+        logits_gating = logits[:, cfg.dataset.num_classes:]
 
         p_t_x_clf = jax.nn.softmax(x=logits_clf, axis=-1)  # (batch, num_classes)
 
@@ -81,12 +74,6 @@ def train_step(
         )  # (batch, num_experts + 1, num_classes)
 
         # prediction of gating model
-        logits_gating, gating_batch_stats = gating_state.apply_fn(
-            variables={'params': gating_params, 'batch_stats': gating_state.batch_stats},
-            x=x,
-            train=True,
-            mutable=['batch_stats']
-        )  # (batch, num_experts + 1)
         log_p_z_x_gamma = jax.nn.log_softmax(x=logits_gating, axis=-1)
 
         # region E-step: Pr(z | x, y, t, gamma)
@@ -113,33 +100,23 @@ def train_step(
         loss = loss - jnp.sum(a=q_z * log_p_z_x_gamma, axis=-1)
         loss = jnp.mean(a=loss, axis=0)
 
-        return loss, (gating_batch_stats, theta_batch_stats)
+        return loss, batch_stats
 
-    grad_value_fn = jax.value_and_grad(fun=loss_function, argnums=range(2), has_aux=True)
-    (loss, (batch_stats_gating, batch_stats_theta)), (grads_gating, grads_theta) = grad_value_fn(
-        gating_state.params,
-        theta_state.params
-    )
+    grad_value_fn = jax.value_and_grad(fun=loss_function, argnums=0, has_aux=True)
+    (loss, batch_stats), grads = grad_value_fn(state.params)
 
     # update parameters from gradients
-    gating_state = gating_state.apply_gradients(grads=grads_gating)
-    theta_state = theta_state.apply_gradients(grads=grads_theta)
+    state = state.apply_gradients(grads=grads)
 
     # update batch statistics
-    gating_state = gating_state.replace(batch_stats=batch_stats_gating['batch_stats'])
-    theta_state = theta_state.replace(batch_stats=batch_stats_theta['batch_stats'])
+    state = state.replace(batch_stats=batch_stats['batch_stats'])
     # endregion
 
     # return grads_gating, batch_stats_gating, grads_theta, batch_stats_theta, loss
-    return gating_state, theta_state, loss
+    return state, loss
 
 
-def train(
-    dataset: dx._c.Buffer,
-    gating_state: TrainState,
-    theta_state: TrainState,
-    cfg: DictConfig
-) -> tuple[TrainState, TrainState, Scalar]:
+def train(dataset: dx._c.Buffer, state: TrainState, cfg: DictConfig) -> tuple[TrainState, Scalar]:
     """the main training procedure
     """
     # batching and shuffling the dataset
@@ -172,12 +149,11 @@ def train(
         y = jnp.asarray(a=samples['ground_truth'], dtype=jnp.int32)  # true int labels  (batch,)
         t = jnp.asarray(a=samples['label'], dtype=jnp.int32)  # annotated int labels (batch, num_experts)
 
-        gating_state, theta_state, loss = train_step(
+        state, loss = train_step(
             x=x,
             y=y,
             t=t,
-            gating_state=gating_state,
-            theta_state=theta_state,
+            state=state,
             cfg=cfg
         )
 
@@ -187,7 +163,7 @@ def train(
         # tracking
         loss_accum.update(values=loss)
 
-    return gating_state, theta_state, loss_accum.compute()
+    return state, loss_accum.compute()
 
 
 @jax.jit
@@ -204,18 +180,13 @@ def prediction_step(x: Array, state: TrainState) -> Array:
     return logits_p_z
 
 
-def evaluate(
-    dataset: dx._c.Buffer,
-    gating_state: TrainState,
-    theta_state: TrainState,
-    cfg: DictConfig
-) -> tuple[Scalar, Counter, list[Array]]:
+def evaluate(dataset: dx._c.Buffer, state: TrainState, cfg: DictConfig) -> tuple[Scalar, Counter, list[Array]]:
     """calculate the average cluster probability vector
 
     Args:
         dataset:
-        gating_state:
-        theta_state:
+        state:
+        cfg:
     """
     # prepare dataset for training
     dset = prepare_dataset(
@@ -251,7 +222,8 @@ def evaluate(
         t = jax.nn.one_hot(x=t, num_classes=cfg.dataset.num_classes)  # (batch, num_experts, num_classes)
 
         # Pr(z | x, gamma)
-        logits_p_z = prediction_step(x=x, state=gating_state)  # (batch, num_experts + 1)
+        logits = prediction_step(x=x, state=state)
+        logits_p_z = logits[:, cfg.dataset.num_classes:]
 
         # tracking ln Pr(z | x, gamma)
         log_p_z = jax.nn.log_softmax(x=logits_p_z, axis=-1)
@@ -264,12 +236,7 @@ def evaluate(
         coverages.update(np.asarray(a=selected_expert_ids, dtype=np.int32))
 
         # accuracy
-        logits_p_y_x_theta, _ = theta_state.apply_fn(
-            variables={'params': theta_state.params, 'batch_stats': theta_state.batch_stats},
-            x=x,
-            train=False,
-            mutable=['batch_stats']
-        )  # (batch, num_classes)
+        logits_p_y_x_theta = logits[:, :cfg.dataset.num_classes]
         human_and_model_predictions = jnp.concatenate(
             arrays=(t, logits_p_y_x_theta[:, None, :]),
             axis=1
@@ -315,27 +282,11 @@ def main(cfg: DictConfig) -> None:
     base_model = hydra.utils.instantiate(config=cfg.model)
 
     # parameter of gating function
-    gating_state = initialise_huggingface_resnet(
+    state = initialise_huggingface_resnet(
         model=base_model(
-            num_classes=len(cfg.dataset.train_files) + 1,  # add a classifier
+            num_classes=len(cfg.dataset.train_files) + cfg.dataset.num_classes + 1,
             input_shape=(1,) + tuple(cfg.dataset.crop_size) + (dset_train[0]['image'].shape[-1],),
-            dtype=jnp.bfloat16
-        ),
-        sample=jnp.expand_dims(a=dset_train[0]['image'] / 255, axis=0),
-        num_training_samples=len(dset_train),
-        lr=cfg.training.gating_lr,
-        batch_size=cfg.training.batch_size,
-        num_epochs=cfg.training.num_epochs,
-        key=jax.random.key(seed=random.randint(a=0, b=10_000)),
-        max_norm=cfg.hparams.clipped_norm
-    )
-
-    # parameter of annotators
-    theta_state = initialise_huggingface_resnet(
-        model=base_model(
-            num_classes=cfg.dataset.num_classes,
-            input_shape=(1,) + tuple(cfg.dataset.crop_size) + (dset_train[0]['image'].shape[-1],),
-            dtype=jnp.bfloat16
+            dtype=jnp.float32
         ),
         sample=jnp.expand_dims(a=dset_train[0]['image'] / 255, axis=0),
         num_training_samples=len(dset_train),
@@ -381,7 +332,6 @@ def main(cfg: DictConfig) -> None:
         # enable an orbax checkpoint manager to save model's parameters
         with ocp.CheckpointManager(
                 directory=ckpt_dir,
-                item_names=('gating_state', 'theta_state'),
                 options=ckpt_options) as ckpt_mngr:
 
             if cfg.experiment.run_id is None:
@@ -405,14 +355,10 @@ def main(cfg: DictConfig) -> None:
 
                 checkpoint = ckpt_mngr.restore(
                     step=start_epoch_id,
-                    args=ocp.args.Composite(
-                        gating_state=ocp.args.StandardRestore(item=gating_state),
-                        theta_state=ocp.args.StandardRestore(item=theta_state)
-                    )
+                    args=ocp.args.StandardRestore(item=state)
                 )
 
-                gating_state = checkpoint.gating_state
-                theta_state = checkpoint.theta_state
+                state = checkpoint.state
 
                 del checkpoint
 
@@ -425,17 +371,15 @@ def main(cfg: DictConfig) -> None:
                 colour='green',
                 disable=not cfg.data_loading.progress_bar
             ):
-                gating_state, theta_state, loss = train(
+                state, loss = train(
                     dataset=dset_train,
-                    gating_state=gating_state,
-                    theta_state=theta_state,
+                    state=state,
                     cfg=cfg
                 )
 
                 accuracy, coverages, p_z = evaluate(
                     dataset=dset_test,
-                    gating_state=gating_state,
-                    theta_state=theta_state,
+                    state=state,
                     cfg=cfg
                 )
 

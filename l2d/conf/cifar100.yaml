@@ -30,5 +30,6 @@ model:
   _target_: models.PreActResNet.ResNet18
 
 hparams:
-  Dirichlet_concentration: [1., 1., 0.51325]
+  epsilon_lower: [0., 0., 0.]
+  epsilon_upper: [1., 1., 0.4]
   clipped_norm: 10
