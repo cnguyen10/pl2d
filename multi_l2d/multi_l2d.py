@@ -2,15 +2,12 @@ import os
 from pathlib import Path
 import random
 from functools import partial
-from collections import Counter
 
 from tqdm import tqdm
 
 import hydra
 from omegaconf import DictConfig, OmegaConf, open_dict
 import flatdict
-
-import numpy as np
 
 import jax
 import jax.numpy as jnp
@@ -160,7 +157,7 @@ def train(dataset: dx._c.Buffer, state: TrainState, cfg: DictConfig) -> tuple[Tr
         iterable=dset,
         desc='epoch',
         ncols=80,
-        total=len(dataset)//cfg.training.batch_size,
+        total=len(dataset)//cfg.training.batch_size + 1,
         leave=False,
         position=2,
         colour='blue',
@@ -198,7 +195,7 @@ def prediction_step(x: Array, state: TrainState) -> Array:
     return logits
 
 
-def evaluate(dataset: dx._c.Buffer, state: TrainState, cfg: DictConfig) -> tuple[Array, Counter]:
+def evaluate(dataset: dx._c.Buffer, state: TrainState, cfg: DictConfig) -> tuple[Scalar, Scalar, Scalar]:
     """
     """
     # prepare dataset for training
@@ -215,7 +212,8 @@ def evaluate(dataset: dx._c.Buffer, state: TrainState, cfg: DictConfig) -> tuple
     )
 
     accuracy_accum = metrics.Accuracy()
-    coverages = Counter()
+    coverage = metrics.Average()
+    clf_accuracy_accum = metrics.Accuracy()
 
     for samples in tqdm(
         iterable=dset,
@@ -235,6 +233,7 @@ def evaluate(dataset: dx._c.Buffer, state: TrainState, cfg: DictConfig) -> tuple
 
         # classifier predictions
         clf_predictions = jnp.argmax(a=logits[:, :cfg.dataset.num_classes], axis=-1)  # (batch,)
+        clf_accuracy_accum.update(logits=logits[:, :cfg.dataset.num_classes], labels=y)
 
         labels_concatenated = jnp.concatenate(arrays=(t, clf_predictions[:, None]), axis=-1)  # (batch, num_experts + 1)
 
@@ -249,14 +248,14 @@ def evaluate(dataset: dx._c.Buffer, state: TrainState, cfg: DictConfig) -> tuple
 
         selected_expert_ids = samples_predicted_by_clf * len(cfg.dataset.test_files) + sample_expert_id  # (batch,)
 
-        coverages.update(np.asarray(a=selected_expert_ids, dtype=np.int32))
+        coverage.update(values=(selected_expert_ids == len(cfg.dataset.test_files)) * 1)
 
         # system's predictions
         y_predicted = labels_concatenated[jnp.arange(y.shape[0]), selected_expert_ids]
 
         accuracy_accum.update(logits=jax.nn.one_hot(x=y_predicted, num_classes=cfg.dataset.num_classes), labels=y)
 
-    return (accuracy_accum.compute(), coverages)
+    return (accuracy_accum.compute(), coverage.compute(), clf_accuracy_accum.compute())
 
 
 @hydra.main(version_base=None, config_path='conf', config_name='conf')
@@ -392,28 +391,27 @@ def main(cfg: DictConfig) -> None:
                     state=state,
                     cfg=cfg
                 )
-                mlflow.log_metric(
-                    key='loss',
-                    value=loss,
-                    step=epoch_id + 1,
-                    synchronous=False
-                )
 
-                accuracy, coverages = evaluate(
+                # wait for checkpoint manager completing the asynchronous saving
+                ckpt_mngr.wait_until_finished()
+
+                accuracy, coverage, clf_accuracy = evaluate(
                     dataset=dset_test,
                     state=state,
                     cfg=cfg
                 )
                 
-                mlflow.log_metric(key='accuracy', value=accuracy, step=epoch_id + 1, synchronous=False)
-
-                for i in range(len(cfg.dataset.train_files) + 1):
-                    mlflow.log_metric(
-                        key='coverage/{:d}'.format(i),
-                        value=coverages[i] / coverages.total(),
-                        step=epoch_id + 1,
-                        synchronous=False
-                    )
+                logged_metrics = dict(
+                    loss=loss,
+                    accuracy=accuracy,
+                    coverage=coverage,
+                    clf_accuracy=clf_accuracy
+                )
+                mlflow.log_metrics(
+                    metrics=logged_metrics,
+                    step=epoch_id + 1,
+                    synchronous=False
+                )
 
                 # # save checkpoint
                 # ckpt_mngr.save(
@@ -423,9 +421,6 @@ def main(cfg: DictConfig) -> None:
                 #         theta_state=ocp.args.StandardSave(theta_state)
                 #     )
                 # )
-
-                # # wait for checkpoint manager completing the asynchronous saving
-                # ckpt_mngr.wait_until_finished()
     return None
 
 
