@@ -1,8 +1,5 @@
 from functools import partial
-from collections import Counter
 import logging
-
-import numpy as np
 
 import jax
 import jax.numpy as jnp
@@ -357,8 +354,8 @@ def train(
         batch_size=cfg.training.batch_size,
         prefetch_size=cfg.data_loading.prefetch_size,
         num_threads=cfg.data_loading.num_threads,
-        mean=cfg.hparams.mean,
-        std=cfg.hparams.std,
+        mean=cfg.dataset.mean,
+        std=cfg.dataset.std,
         random_crop_size=cfg.dataset.crop_size,
         prob_random_h_flip=cfg.hparams.prob_random_h_flip
     )
@@ -437,7 +434,7 @@ def evaluate(
     gating_state: TrainState,
     theta_state: TrainState,
     cfg: DictConfig
-) -> tuple[float, list[float], Counter, list[float], float, Array]:
+) -> tuple[float, list[float], Scalar, list[float], float, Array]:
     """evaluate performance on a dataset
 
     Args:
@@ -449,7 +446,7 @@ def evaluate(
     Returns:
         accuracy: prediction accuracy of l2d
         expert_accuracies: list of expert accuracy
-        coverages: a counter counting the number of samples predicted by each expert
+        coverage: the ratio of number of samples predicted by each expert
         p_z: average output of the gating model, Pr(z | x, gamma)
         ece: expected calibration error
         conf_mat: confusion matrix for the gating model w.r.t. the classifier. In other
@@ -465,8 +462,8 @@ def evaluate(
         batch_size=cfg.training.batch_size,
         prefetch_size=cfg.data_loading.prefetch_size,
         num_threads=cfg.data_loading.num_threads,
-        mean=cfg.hparams.mean,
-        std=cfg.hparams.std,
+        mean=cfg.dataset.mean,
+        std=cfg.dataset.std,
         random_crop_size=cfg.dataset.crop_size,
         prob_random_h_flip=cfg.hparams.prob_random_h_flip
     )
@@ -474,7 +471,7 @@ def evaluate(
     p_z_accum = [metrics.Average() for _ in range(len(cfg.dataset.test_files) + 1)]
     accuracy_accum = metrics.Accuracy()
     expert_accuracies = [metrics.Accuracy() for _ in range(len(cfg.dataset.test_files) + 1)]
-    coverages = Counter()
+    coverage = metrics.Average()
     preds_accum = []  # store prediction to calculate ECE
     labels_true = []
 
@@ -513,7 +510,7 @@ def evaluate(
 
         selected_expert_ids = jnp.argmax(a=logits_p_z, axis=-1)  # (batch_size,)
 
-        coverages.update(np.asarray(a=selected_expert_ids, dtype=np.int32))
+        coverage.update(values=(selected_expert_ids == len(cfg.dataset.test_files)) * 1)
 
         # accuracy
         logits_p_t = expert_prediction_step(x=x, theta_state=theta_state)
@@ -555,7 +552,7 @@ def evaluate(
     return (
         accuracy_accum.compute(),
         [expert_accuracy.compute() for expert_accuracy in expert_accuracies],
-        coverages,
+        coverage.compute(),
         [p_z.compute() for p_z in p_z_accum],
         ece,
         conf_mat
