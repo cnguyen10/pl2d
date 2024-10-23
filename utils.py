@@ -196,7 +196,7 @@ def prepare_dataset(
         
     dset = dset.key_transform(
         key='image',
-        func=lambda x: (x.astype('float32') / 255 + mean) / std
+        func=lambda x: (x.astype('float32') / 255 - mean) / std
     )
     # endregion
 

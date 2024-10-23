@@ -24,11 +24,13 @@ dataset:
   test_ground_truth_file: ${dataset.root}/test.json
   resized_shape: null
   crop_size: [32, 32]
+  mean: null
+  std: null
 
 model:
   _partial_: True
   _target_: models.PreActResNet.ResNet18
 
 hparams:
-  Dirichlet_concentration: [1., 1., 1.]
+  Dirichlet_concentration: [1., 1., 0.75]
   clipped_norm: 10

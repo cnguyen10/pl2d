@@ -144,8 +144,8 @@ def train(dataset: dx._c.Buffer, state: TrainState, cfg: DictConfig) -> tuple[Tr
         batch_size=cfg.training.batch_size,
         prefetch_size=cfg.data_loading.prefetch_size,
         num_threads=cfg.data_loading.num_threads,
-        mean=cfg.hparams.mean,
-        std=cfg.hparams.std,
+        mean=cfg.dataset.mean,
+        std=cfg.dataset.std,
         random_crop_size=cfg.dataset.crop_size,
         prob_random_h_flip=cfg.hparams.prob_random_h_flip
     )
@@ -205,8 +205,8 @@ def evaluate(dataset: dx._c.Buffer, state: TrainState, cfg: DictConfig) -> tuple
         batch_size=cfg.training.batch_size,
         prefetch_size=cfg.data_loading.prefetch_size,
         num_threads=cfg.data_loading.num_threads,
-        mean=cfg.hparams.mean,
-        std=cfg.hparams.std,
+        mean=cfg.dataset.mean,
+        std=cfg.dataset.std,
         random_crop_size=cfg.dataset.crop_size,
         prob_random_h_flip=cfg.hparams.prob_random_h_flip
     )

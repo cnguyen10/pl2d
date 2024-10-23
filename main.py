@@ -136,24 +136,8 @@ def main(cfg: DictConfig) -> None:
     )
     with ocp.CheckpointManager(
         directory='/sda2/cuong_code/classification/logdir/Classification/4cf654e9a8404d3ea6ac78bb37bb9b85/',
-        # item_names=('gating_state', 'theta_state'),
-        # directory='/sda2/cuong_code/pl2d/logdir/PL2D/79c84177cc2b40aea67004e165e1c62a',
         options=ckpt_options
     ) as ckpt_mngr:
-        # checkpoint = ckpt_mngr.restore(
-        #     step=1000,
-        #     args=ocp.args.Composite(
-        #         gating_state=ocp.args.StandardRestore(
-        #             item=gating_state
-        #         ),
-        #         theta_state=ocp.args.StandardRestore(
-        #             item=theta_state
-        #         )
-        #     )
-        # )
-
-        # # gating_state = checkpoint.gating_state
-        # theta_state = checkpoint.theta_state
 
         # del checkpoint
         state = ckpt_mngr.restore(step=1000, args=ocp.args.StandardRestore())
@@ -165,6 +149,26 @@ def main(cfg: DictConfig) -> None:
     theta_state = theta_state.replace(batch_stats=temp)
 
     del temp
+    del state
+
+    # load self-supervised model for gating model
+    with ocp.CheckpointManager(
+        directory='/sda2/cuong_code/simclr_jax/logdir/SimCLR/8bc99940c5194f87b794bddadb276a52',
+        options=ocp.CheckpointManagerOptions(
+            save_interval_steps=50,
+            max_to_keep=1,
+            step_format_fixed_length=3,
+            enable_async_checkpointing=True
+        )
+    ) as ckpt_mngr:
+        state = ckpt_mngr.restore(step=1000, args=ocp.args.StandardRestore())
+        gating_state = gating_state.replace(
+            params={
+                'features': state['params']['features'],
+                'classifier': gating_state.params['classifier']
+            },
+            batch_stats=state['batch_stats']
+        )
     del state
     # endregion
 
@@ -261,7 +265,7 @@ def main(cfg: DictConfig) -> None:
                     )
                 )
 
-                accuracy, expert_accuracies, coverages, p_z, ece, conf_mat = evaluate(
+                accuracy, expert_accuracies, coverage, p_z, ece, conf_mat = evaluate(
                     dataset=dset_test,
                     gating_state=gating_state,
                     theta_state=theta_state,
@@ -271,7 +275,7 @@ def main(cfg: DictConfig) -> None:
                 metric_dict = {
                     'loss': loss,
                     'accuracy': accuracy,
-                    'coverage': coverages[len(cfg.dataset.train_files)] / coverages.total(),
+                    'coverage': coverage,
                     'ece': ece,
                     'ConfusionMat/TN': conf_mat[0, 0],
                     'ConfusionMat/FP': conf_mat[0, 1],

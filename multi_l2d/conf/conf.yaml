@@ -17,8 +17,6 @@ experiment:
 
 hparams:
   prob_random_h_flip: 0.5
-  mean: null
-  std: null
 
 training:
   gating_lr: 0.01

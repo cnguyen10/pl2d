@@ -10,11 +10,15 @@ dataset:
     # - ${dataset.root}/synthetic_expert/label_noise_51_train_0.25.json
     - ${dataset.root}/synthetic_expert/train_0_1_2_3_4_5_6_7_8_9_${dataset.missing_rate}.json
     - ${dataset.root}/synthetic_expert/train_10_11_12_13_14_15_16_17_18_19_${dataset.missing_rate}.json
+    # - ${dataset.root}/synthetic_expert/train_0_1_2_3_4_5_6_7_8_9_0.2_${dataset.missing_rate}.json
+    # - ${dataset.root}/synthetic_expert/train_10_11_12_13_14_15_16_17_18_19_0.2_${dataset.missing_rate}.json
   train_complete_files:
     # - ${dataset.root}/synthetic_expert/label_noise_9_train_0.25.json
     # - ${dataset.root}/synthetic_expert/label_noise_51_train_0.25.json
     - ${dataset.root}/synthetic_expert/train_0_1_2_3_4_5_6_7_8_9.json
     - ${dataset.root}/synthetic_expert/train_10_11_12_13_14_15_16_17_18_19.json
+    # - ${dataset.root}/synthetic_expert/train_0_1_2_3_4_5_6_7_8_9_0.2.json
+    # - ${dataset.root}/synthetic_expert/train_10_11_12_13_14_15_16_17_18_19_0.2.json
   train_ground_truth_file: ${dataset.root}/train.json
   test_files:
     # - ${dataset.root}/synthetic_expert/label_noise_9_test_0.25.json
@@ -24,6 +28,10 @@ dataset:
   test_ground_truth_file: ${dataset.root}/test.json
   resized_shape: null
   crop_size: [32, 32]
+  # mean: [0.485, 0.456, 0.406]
+  # std: [0.229, 0.224, 0.225]
+  mean: null
+  std: null
 
 model:
   _partial_: True

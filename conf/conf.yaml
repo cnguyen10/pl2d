@@ -21,7 +21,7 @@ hparams:
   std: null
 
 training:
-  gating_lr: 0.01
+  gating_lr: 0.001
   expert_lr: 0.01
   num_fixed_point_iterations: 10
   batch_size: 128
