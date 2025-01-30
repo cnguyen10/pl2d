@@ -1,5 +1,5 @@
 defaults:
-  - cifar100 # cifar100, chaoyang, micebone or nihao in the same folder
+  - cifar10 # cifar100, chaoyang, micebone or nihao in the same folder
   - override hydra/hydra_logging: disabled  
   - override hydra/job_logging: disabled
   - _self_

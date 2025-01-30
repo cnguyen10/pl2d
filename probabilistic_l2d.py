@@ -156,18 +156,15 @@ def unconstrained_posteriors(
     missing_vec = jnp.array(object=(t == -1), dtype=jnp.int32)  # (batch, num_experts)
 
     # convert annotations to one-hot vectors
-    t_one_hot = jax.nn.one_hot(
-        x=t * (1 - missing_vec),  # temporarily convert missing into label 0
-        num_classes=num_classes
-    )  # (batch, num_experts, num_classes)
+    t_one_hot = jax.nn.one_hot(x=t, num_classes=num_classes)  # (batch, num_experts, num_classes)
     t_one_hot = optax.smooth_labels(labels=t_one_hot, alpha=1e-3)  # (batch, num_experts, num_classes)
 
-    # append the classifier into the experts
+    # append the classifier's prediction into the experts' annotations
     missing_vec = jnp.concatenate(
         arrays=(missing_vec, jnp.expand_dims(a=jnp.zeros_like(a=y, dtype=jnp.int32), axis=-1)),
         axis=1
     )  # (batch, num_experts + 1,)
-    p_t_x_clf = jnp.exp(log_p_t_x[:, -1, :])  # (batch, num_classes)
+    p_t_x_clf = jax.nn.softmax(x=log_p_t_x[:, -1, :], axis=-1)  # (batch, num_classes)
     t_one_hot = jnp.concatenate(
         arrays=(t_one_hot, p_t_x_clf[:, None, :]),
         axis=1
@@ -204,11 +201,11 @@ def unconstrained_posteriors(
         log_q_z = log_p_z_x + jnp.sum(a=q['t'] * log_p_y_t[:, None, :], axis=-1) - 1  # (batch, num_experts + 1,)
         log_q_z -= jax.nn.logsumexp(a=log_q_z, axis=-1, keepdims=True)  # normalise
 
-        q_new['z'] = jnp.exp(log_q_z)  # (batch, num_experts + 1,)
+        q_new['z'] = jax.nn.softmax(x=log_q_z, axis=-1)  # (batch, num_experts + 1,)
         q_t_one_out = q_t_one_row_out_fn(q['t'], q_t_ids)  # (batch, num_experts + 1, num_experts, num_classes)
         log_q_t = log_p_t_x + jnp.sum(a=q_new['z'][:, :, None, None] * q_t_one_out * log_p_y_t[:, None, None, :], axis=-2) - 1  # (batch, num_experts + 1, num_classes)
         log_q_t -= jax.nn.logsumexp(a=log_q_t, axis=-1, keepdims=True)
-        q_new['t'] = jnp.exp(log_q_t)
+        q_new['t'] = jax.nn.softmax(x=log_q_t, axis=-1)
 
         q_new['t'] = q_new['t'] * jnp.expand_dims(a=missing_vec, axis=-1) \
             + (1 - jnp.expand_dims(a=missing_vec, axis=-1)) * t_one_hot  # (batch, num_experts + 1, num_classes)

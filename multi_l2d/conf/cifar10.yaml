@@ -1,0 +1,28 @@
+dataset:
+  name: cifar10
+  root: /sda2/datasets/cifar10/ciFAIR-10
+  num_classes: 10
+  missing_rate: 0.3
+  train_files:
+    - ${dataset.root}/synthetic_experts/train_random_noise_0.2_26_${dataset.missing_rate}.json
+    - ${dataset.root}/synthetic_experts/train_random_noise_0.2_41_${dataset.missing_rate}.json
+  train_complete_files:
+    - ${dataset.root}/synthetic_experts/train_random_noise_0.2_26.json
+    - ${dataset.root}/synthetic_experts/train_random_noise_0.2_41.json
+  train_ground_truth_file: ${dataset.root}/train.json
+  test_files:
+    - ${dataset.root}/synthetic_experts/test_random_noise_0.2_26.json
+    - ${dataset.root}/synthetic_experts/test_random_noise_0.2_41.json
+  test_ground_truth_file: ${dataset.root}/test.json
+  resized_shape: null
+  crop_size: [32, 32]
+  mean: null
+  std: null
+
+model:
+  _partial_: True
+  _target_: models.ConvNet.ConvNet
+
+hparams:
+  Dirichlet_concentration: [1., 1., -392.5]
+  clipped_norm: 10

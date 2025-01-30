@@ -282,7 +282,7 @@ def initialise_huggingface_resnet(
     """
     lr_schedule_fn = optax.cosine_decay_schedule(
         init_value=lr,
-        decay_steps=(num_epochs + 10) * (num_training_samples // batch_size)
+        decay_steps=(num_epochs + 50) * (num_training_samples // batch_size)
     )
 
     # pass dummy data to initialise model's parameters
@@ -301,7 +301,7 @@ def initialise_huggingface_resnet(
     # define an optimizer
     tx = optax.chain(
         weight_decay,
-        optax.add_noise(eta=0.01, gamma=0.55, seed=random.randint(a=0, b=1_000)),
+        # optax.add_noise(eta=0.01, gamma=0.55, seed=random.randint(a=0, b=1_000)),
         optax.clip_by_global_norm(max_norm=max_norm) if max_norm is not None else optax.identity(),
         optax.sgd(learning_rate=lr_schedule_fn, momentum=0.9)
     )

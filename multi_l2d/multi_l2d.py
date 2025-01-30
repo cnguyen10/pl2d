@@ -7,13 +7,13 @@ from tqdm import tqdm
 
 import hydra
 from omegaconf import DictConfig, OmegaConf, open_dict
-import flatdict
 
 import jax
 import jax.numpy as jnp
 
 from flax.nnx import metrics
 from flax.core import FrozenDict
+from flax.traverse_util import flatten_dict
 
 import orbax.checkpoint as ocp
 
@@ -67,6 +67,25 @@ def train_step(x: Array, y_augmented: Array, state: TrainState, cfg: DictConfig)
         state:
         loss:
     """
+    def calculate_loss_prior(logits: Array) -> Scalar:
+        """
+        """
+        log_softmax = jax.nn.log_softmax(x=logits, axis=-1)
+        log_softmax_clf = jax.nn.logsumexp(a=log_softmax[:, :cfg.dataset.num_classes], axis=-1)
+        log_logits_gating = jnp.concatenate(
+            arrays=(log_softmax[:, cfg.dataset.num_classes:], log_softmax_clf[:, None]),
+            axis=-1
+        )
+
+        loss_prior = - jnp.sum(
+            a=(jnp.array(object=cfg.hparams.Dirichlet_concentration) - 1) * log_logits_gating,
+            axis=-1
+        )
+        loss_prior = jnp.mean(a=loss_prior, axis=0)
+
+        return loss_prior
+
+
     def softmax_loss_fn(params: FrozenDict) -> tuple[Scalar, FrozenDict]:
         """loss in Multi_L2D with softmax
         """
@@ -80,18 +99,8 @@ def train_step(x: Array, y_augmented: Array, state: TrainState, cfg: DictConfig)
         loss = optax.losses.softmax_cross_entropy(logits=logits, labels=y_augmented)
         loss = jnp.mean(a=loss, axis=0)
 
-        log_softmax = jax.nn.log_softmax(x=logits, axis=-1)
-        log_softmax_clf = jax.nn.logsumexp(a=log_softmax[:, :cfg.dataset.num_classes], axis=-1)
-        log_logits_gating = jnp.concatenate(
-            arrays=(log_softmax[:, cfg.dataset.num_classes:], log_softmax_clf[:, None]),
-            axis=-1
-        )
-        loss_prior = - jnp.sum(
-            a=(jnp.array(object=cfg.hparams.Dirichlet_concentration) - 1) * log_logits_gating,
-            axis=-1
-        )
-        loss_prior = jnp.mean(a=loss_prior, axis=0)
-        
+        loss_prior = calculate_loss_prior(logits=logits)
+
         loss = loss + (len(x) / cfg.dataset.length) * loss_prior
 
         return loss, batch_stats
@@ -113,12 +122,16 @@ def train_step(x: Array, y_augmented: Array, state: TrainState, cfg: DictConfig)
         loss = jnp.sum(a=loss, axis=-1)
         loss = jnp.mean(a=loss, axis=0)
 
+        loss_prior = calculate_loss_prior(logits=logits)
+
+        loss = loss + (len(x) / cfg.dataset.length) * loss_prior
+
         return loss, batch_stats
 
 
     grad_value_fn = jax.value_and_grad(
-        # fun=softmax_loss_fn,
-        fun=one_vs_all,
+        fun=softmax_loss_fn,
+        # fun=one_vs_all,
         argnums=0,
         has_aux=True
     )
@@ -248,7 +261,7 @@ def evaluate(dataset: dx._c.Buffer, state: TrainState, cfg: DictConfig) -> tuple
 
         selected_expert_ids = samples_predicted_by_clf * len(cfg.dataset.test_files) + sample_expert_id  # (batch,)
 
-        coverage.update(values=(selected_expert_ids == len(cfg.dataset.test_files)) * 1)
+        coverage.update(values=samples_predicted_by_clf)
 
         # system's predictions
         y_predicted = labels_concatenated[jnp.arange(y.shape[0]), selected_expert_ids]
@@ -352,10 +365,7 @@ def main(cfg: DictConfig) -> None:
             if cfg.experiment.run_id is None:
                 # log hyper-parameters
                 mlflow.log_params(
-                    params=flatdict.FlatDict(
-                        value=OmegaConf.to_container(cfg=cfg),
-                        delimiter='.'
-                    )
+                    params=flatten_dict(xs=OmegaConf.to_container(cfg=cfg), sep='.')
                 )
 
                 # log source code

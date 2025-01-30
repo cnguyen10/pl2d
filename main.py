@@ -7,10 +7,11 @@ from tqdm import tqdm
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
-import flatdict
 
 import jax
 import jax.numpy as jnp
+
+from flax.traverse_util import flatten_dict
 
 import orbax.checkpoint as ocp
 
@@ -99,7 +100,7 @@ def main(cfg: DictConfig) -> None:
         lr=cfg.training.expert_lr,
         batch_size=cfg.training.batch_size,
         num_epochs=cfg.training.num_epochs,
-        max_norm=cfg.hparams.clipped_norm
+        max_norm=None
     )
     init_resnet_fn_batch = jax.vmap(fun=init_resnet_fn, in_axes=0, out_axes=0)
     keys = jax.vmap(fun=jax.random.key, in_axes=0, out_axes=0)(
@@ -119,57 +120,6 @@ def main(cfg: DictConfig) -> None:
         step_format_fixed_length=3,
         enable_async_checkpointing=True
     )
-
-    # load pretrained classifier
-    state = initialise_huggingface_resnet(
-        model=base_model(
-            num_classes=cfg.dataset.num_classes,
-            input_shape=(1,) + tuple(cfg.dataset.crop_size) + (dset_train[0]['image'].shape[-1],),
-            dtype=jnp.bfloat16
-        ),
-        sample=jnp.expand_dims(a=dset_train[0]['image'] / 255, axis=0),
-        num_training_samples=len(dset_train),
-        lr=cfg.training.gating_lr,
-        batch_size=cfg.training.batch_size,
-        num_epochs=cfg.training.num_epochs,
-        key=jax.random.key(seed=random.randint(a=0, b=10_000))
-    )
-    with ocp.CheckpointManager(
-        directory='/sda2/cuong_code/classification/logdir/Classification/4cf654e9a8404d3ea6ac78bb37bb9b85/',
-        options=ckpt_options
-    ) as ckpt_mngr:
-
-        # del checkpoint
-        state = ckpt_mngr.restore(step=1000, args=ocp.args.StandardRestore())
-
-    temp = jax.tree.map(lambda x, y: x + jnp.zeros_like(a=y), state['params'], theta_state.params)
-    theta_state = theta_state.replace(params=temp)
-
-    temp = jax.tree.map(lambda x, y: x + jnp.zeros_like(a=y), state['batch_stats'], theta_state.batch_stats)
-    theta_state = theta_state.replace(batch_stats=temp)
-
-    del temp
-    del state
-
-    # load self-supervised model for gating model
-    with ocp.CheckpointManager(
-        directory='/sda2/cuong_code/simclr_jax/logdir/SimCLR/8bc99940c5194f87b794bddadb276a52',
-        options=ocp.CheckpointManagerOptions(
-            save_interval_steps=50,
-            max_to_keep=1,
-            step_format_fixed_length=3,
-            enable_async_checkpointing=True
-        )
-    ) as ckpt_mngr:
-        state = ckpt_mngr.restore(step=1000, args=ocp.args.StandardRestore())
-        gating_state = gating_state.replace(
-            params={
-                'features': state['params']['features'],
-                'classifier': gating_state.params['classifier']
-            },
-            batch_stats=state['batch_stats']
-        )
-    del state
     # endregion
 
     mlflow.set_tracking_uri(uri=cfg.experiment.tracking_uri)
@@ -206,10 +156,7 @@ def main(cfg: DictConfig) -> None:
 
                 # log hyper-parameters
                 mlflow.log_params(
-                    params=flatdict.FlatDict(
-                        value=OmegaConf.to_container(cfg=cfg),
-                        delimiter='.'
-                    )
+                    params=flatten_dict(xs=OmegaConf.to_container(cfg=cfg), sep='.')
                 )
 
                 # log source code

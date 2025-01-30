@@ -196,6 +196,8 @@ class PreActResNetFeature(nn.Module):
             use_bias=False,
             dtype=self.dtype
         )(inputs=x)
+        out = nn.BatchNorm(use_running_average=not train)(x=out)
+        out = nn.relu(x=out)
 
         in_planes, layer1 = make_layer(
             block=self.block,
