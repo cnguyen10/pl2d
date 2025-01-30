@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 import random
-from functools import partial
 
 from tqdm import tqdm
 
@@ -11,22 +10,56 @@ from omegaconf import DictConfig, OmegaConf
 import jax
 import jax.numpy as jnp
 
+from flax import nnx
 from flax.traverse_util import flatten_dict
+
+import optax
 
 import orbax.checkpoint as ocp
 
 import mlflow
 
-from utils import (
-    make_dataset,
-    initialise_huggingface_resnet
-)
+from utils import make_dataset
 
-from probabilistic_l2d import (
-    create_train_state_batch,
-    train,
-    evaluate
-)
+from probabilistic_l2d import train, evaluate
+
+
+def init_tx(
+    dataset_length: int,
+    lr: float,
+    batch_size: int,
+    num_epochs: int,
+    weight_decay: float,
+    momentum: float,
+    clipped_norm: float | None
+) -> optax.GradientTransformationExtraArgs:
+    """initialize parameters of an optimizer
+    """
+     # add L2 regularisation(aka weight decay)
+    weight_decay = optax.masked(
+        inner=optax.add_decayed_weights(
+            weight_decay=weight_decay,
+            mask=None
+        ),
+        mask=lambda p: jax.tree_util.tree_map(lambda x: x.ndim != 1, p)
+    )
+
+    num_iters_per_epoch = dataset_length // batch_size
+    lr_schedule_fn = optax.cosine_decay_schedule(
+        init_value=lr,
+        decay_steps=(num_epochs + 10) * num_iters_per_epoch
+    )
+
+    # define an optimizer
+    tx = optax.chain(
+        weight_decay,
+        optax.add_noise(eta=0.01, gamma=0.55, seed=random.randint(a=0, b=100)),
+        optax.clip_by_global_norm(max_norm=clipped_norm) \
+            if clipped_norm is not None else optax.identity(),
+        optax.sgd(learning_rate=lr_schedule_fn, momentum=momentum)
+    )
+
+    return tx
 
 
 @hydra.main(version_base=None, config_path="./conf", config_name="conf")
@@ -69,49 +102,57 @@ def main(cfg: DictConfig) -> None:
 
     # region MODELS
     # a functools.partial wrapper of resnet
-    base_model = hydra.utils.instantiate(config=cfg.model)
+    model_fn = hydra.utils.instantiate(config=cfg.model)  # function to instanitate
 
     # parameter of gating function
-    gating_state = initialise_huggingface_resnet(
-        model=base_model(
-            num_classes=len(cfg.dataset.train_files) + 1,  # add a classifier
-            input_shape=(1,) + tuple(cfg.dataset.crop_size) + (dset_train[0]['image'].shape[-1],),
-            dtype=jnp.bfloat16
-        ),
-        sample=jnp.expand_dims(a=dset_train[0]['image'] / 255, axis=0),
-        num_training_samples=len(dset_train),
-        lr=cfg.training.gating_lr,
-        batch_size=cfg.training.batch_size,
-        num_epochs=cfg.training.num_epochs,
-        key=jax.random.key(seed=random.randint(a=0, b=10_000)),
-        max_norm=cfg.hparams.clipped_norm
+    gating_model = model_fn(
+        num_classes=len(cfg.dataset.train_files) + 1,  # add a classifier
+        rngs=nnx.Rngs(jax.random.PRNGKey(seed=random.randint(a=0, b=100))),
+        dtype=eval(cfg.jax.dtype)
+    )
+    gating_state = nnx.Optimizer(
+        model=gating_model,
+        tx=init_tx(
+            dataset_length=len(dset_train),
+            lr=cfg.training.gating_lr,
+            batch_size=cfg.training.batch_size,
+            num_epochs=cfg.training.num_epochs,
+            weight_decay=cfg.training.weight_decay,
+            momentum=cfg.training.momentum,
+            clipped_norm=cfg.hparams.clipped_norm
+        )
     )
 
-    # parameter of annotators
-    init_resnet_fn = partial(
-        initialise_huggingface_resnet,
-        model=base_model(
+    del gating_model
+
+    # vmap to create an ensemble of models modelling annotators
+    @nnx.vmap(in_axes=0, out_axes=0)
+    def create_expert_model(key: jax.random.PRNGKey) -> nnx.Module:
+        return model_fn(
             num_classes=cfg.dataset.num_classes,
-            input_shape=(1,) + tuple(cfg.dataset.crop_size) + (dset_train[0]['image'].shape[-1],),
-            dtype=jnp.bfloat16
-        ),
-        sample=jnp.expand_dims(a=dset_train[0]['image'] / 255, axis=0),
-        num_training_samples=len(dset_train),
-        lr=cfg.training.expert_lr,
-        batch_size=cfg.training.batch_size,
-        num_epochs=cfg.training.num_epochs,
-        max_norm=None
-    )
-    init_resnet_fn_batch = jax.vmap(fun=init_resnet_fn, in_axes=0, out_axes=0)
-    keys = jax.vmap(fun=jax.random.key, in_axes=0, out_axes=0)(
-        jnp.array(object=[random.randint(a=0, b=1_000) for _ in range(len(cfg.dataset.train_files) + 1)])
-    )
-    theta_state = init_resnet_fn_batch(key=keys)
-    theta_state = create_train_state_batch(state=theta_state)
+            rngs=nnx.Rngs(key),
+            dtype=eval(cfg.jax.dtype)
+        )
 
-    del keys
-    del init_resnet_fn
-    del init_resnet_fn_batch
+    keys = jax.random.split(
+        key=jax.random.PRNGKey(seed=random.randint(a=0, b=100)),
+        num=len(cfg.dataset.train_files) + 1
+    )
+    theta_model = create_expert_model(keys)
+    theta_state = nnx.Optimizer(
+        model=theta_model,
+        tx=init_tx(
+            dataset_length=len(dset_train),
+            lr=cfg.training.expert_lr,
+            batch_size=cfg.training.batch_size,
+            num_epochs=cfg.training.num_epochs,
+            weight_decay=cfg.training.weight_decay,
+            momentum=cfg.training.momentum,
+            clipped_norm=cfg.hparams.clipped_norm
+        )
+    )
+
+    del theta_model
 
     # options to store models
     ckpt_options = ocp.CheckpointManagerOptions(
@@ -147,7 +188,7 @@ def main(cfg: DictConfig) -> None:
         # enable an orbax checkpoint manager to save model's parameters
         with ocp.CheckpointManager(
             directory=ckpt_dir,
-            item_names=('gating_state', 'theta_state'),
+            item_names=('gating', 'theta'),
             options=ckpt_options
         ) as ckpt_mngr:
 
@@ -170,17 +211,13 @@ def main(cfg: DictConfig) -> None:
                 checkpoint = ckpt_mngr.restore(
                     step=start_epoch_id,
                     args=ocp.args.Composite(
-                        gating_state=ocp.args.StandardRestore(
-                            item=gating_state
-                        ),
-                        theta_state=ocp.args.StandardRestore(
-                            item=theta_state
-                        )
+                        gating=ocp.args.StandardRestore(item=gating_state.model),
+                        theta=ocp.args.StandardRestore(item=theta_state.model)
                     )
                 )
 
-                gating_state = checkpoint.gating_state
-                theta_state = checkpoint.theta_state
+                gating_state = nnx.update(gating_state.model, checkpoint.gating)
+                theta_state = nnx.update(theta_state.model, checkpoint.theta)
 
                 del checkpoint
 
@@ -207,8 +244,8 @@ def main(cfg: DictConfig) -> None:
                 ckpt_mngr.save(
                     step=epoch_id + 1,
                     args=ocp.args.Composite(
-                        gating_state=ocp.args.StandardSave(gating_state),
-                        theta_state=ocp.args.StandardSave(theta_state)
+                        gating=ocp.args.StandardSave(nnx.state(gating_state.model)),
+                        theta=ocp.args.StandardSave(nnx.state(theta_state.model))
                     )
                 )
 

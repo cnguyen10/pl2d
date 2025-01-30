@@ -17,15 +17,15 @@ experiment:
 
 hparams:
   prob_random_h_flip: 0.5
-  mean: null
-  std: null
 
 training:
-  gating_lr: 0.001
+  gating_lr: 0.01
   expert_lr: 0.01
   num_fixed_point_iterations: 10
   batch_size: 128
   num_epochs: 300
+  momentum: 0.9
+  weight_decay: 0.0005
 
 data_loading:
   progress_bar: True
@@ -36,3 +36,4 @@ jax:
   platform: cuda
   mem: 0.9
   disable_jit: False
+  dtype: jnp.bfloat16

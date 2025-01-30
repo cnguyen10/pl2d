@@ -4,14 +4,11 @@ import logging
 import jax
 import jax.numpy as jnp
 
-from flax.core import FrozenDict
-from flax.nnx import metrics
+from flax import nnx
 
 import optax
 
 from tensorflow_probability.substrates import jax as tfp
-
-from chex import Array, Scalar
 
 from jaxopt import ProjectedGradient
 from jaxopt.projection import projection_non_negative
@@ -22,51 +19,11 @@ from mlx import data as dx
 
 from tqdm import tqdm
 
-from utils import (
-    TrainState,
-    prepare_dataset,
-    confusion_matrix
-)
-
-
-def create_train_state_batch(state: TrainState) -> TrainState:
-    """
-    """
-    # region define vmap apply function
-    def apply_function(params: FrozenDict, batch_stats: FrozenDict, x: Array, train: bool) -> tuple[Array, FrozenDict]:
-        """
-        """
-        logits, batch_stats = state.apply_fn(
-            variables={'params': params, 'batch_stats': batch_stats},
-            x=x,
-            train=train,
-            mutable=['batch_stats']
-        )
-
-        return logits, batch_stats
-
-    apply_fn_batch = jax.vmap(
-        fun=apply_function,
-        in_axes=(
-            jax.tree.map(f=lambda x: 0, tree=state.params),
-            jax.tree.map(f=lambda x: 0, tree=state.batch_stats),
-            None,
-            None
-        )
-    )
-
-    states = TrainState.create(
-        apply_fn=apply_fn_batch,
-        params=state.params,
-        batch_stats=state.batch_stats,
-        tx=state.tx
-    )
-
-    return states
+from utils import prepare_dataset, confusion_matrix
 
 
 @jax.jit
-def get_unnorm_log_q_z_tilde(q_uncon: Array, params: dict[str, Array]) -> Array:
+def get_unnorm_log_q_z_tilde(q_uncon: jax.Array, params: dict[str, jax.Array]) -> jax.Array:
     """calculate the un-normalised q(z)
 
     Args:
@@ -87,10 +44,10 @@ def get_unnorm_log_q_z_tilde(q_uncon: Array, params: dict[str, Array]) -> Array:
 
 @jax.jit
 def constrained_posterior(
-    q_z_uncon: Array,
-    epsilon_upper: Array,
-    epsilon_lower: Array
-) -> Array:
+    q_z_uncon: jax.Array,
+    epsilon_upper: jax.Array,
+    epsilon_lower: jax.Array
+) -> jax.Array:
     """calculate the work-load balancing posterior
 
     Args:
@@ -101,7 +58,7 @@ def constrained_posterior(
     Returns:
         log_q_z: the constrained posterior of z
     """
-    def duality_Lagrangian(params: dict[str, Array]) -> Scalar:
+    def duality_Lagrangian(params: dict[str, jax.Array]) -> jax.Array:
         """the duality of Lagrangian to find the Lagrange multiplier
 
         Args:
@@ -143,14 +100,14 @@ def constrained_posterior(
 
 @partial(jax.jit, static_argnames=('num_classes', 'num_experts', 'num_iterations'))
 def unconstrained_posteriors(
-    log_p_z_x: Array,  # (batch, num_experts + 1)
-    log_p_t_x: Array,  # (batch, num_experts + 1, num_classes)
-    y: Array,  # (batch,)
-    t: Array,  # (batch, num_experts)
+    log_p_z_x: jax.Array,  # (batch, num_experts + 1)
+    log_p_t_x: jax.Array,  # (batch, num_experts + 1, num_classes)
+    y: jax.Array,  # (batch,)
+    t: jax.Array,  # (batch, num_experts)
     num_classes: int,
     num_experts: int,
     num_iterations: int
-) -> tuple[Array, Array]:
+) -> tuple[jax.Array, jax.Array]:
     """
     """
     missing_vec = jnp.array(object=(t == -1), dtype=jnp.int32)  # (batch, num_experts)
@@ -193,10 +150,10 @@ def unconstrained_posteriors(
         in_axes=(0, 0)
     )
 
-    def fixed_point_iterations(i: int, q: dict[str, Array]) -> dict[str, Array]:
+    def fixed_point_iterations(i: int, q: dict[str, jax.Array]) -> dict[str, jax.Array]:
         """
         """
-        q_new: dict[str, Array] = {}
+        q_new: dict[str, jax.Array] = {}
 
         log_q_z = log_p_z_x + jnp.sum(a=q['t'] * log_p_y_t[:, None, :], axis=-1) - 1  # (batch, num_experts + 1,)
         log_q_z -= jax.nn.logsumexp(a=log_q_z, axis=-1, keepdims=True)  # normalise
@@ -222,17 +179,27 @@ def unconstrained_posteriors(
     return q_new['z'], q_new['t']
 
 
-@partial(jax.jit, static_argnames=('cfg',), donate_argnames=('gating_state', 'theta_state'))
-def expectation_maximisation(
-    x: Array,
-    y: Array,
-    t: Array,
-    gating_state: TrainState,
-    theta_state: TrainState,
+@nnx.jit
+@nnx.vmap(in_axes=(0, None), out_axes=0)
+def vmap_forward(model: nnx.Module, x: jax.Array) -> jax.Array:
+    """perform a parallel forward pass of an ensemble
+    """
+    out = model(x)
+    return out
+
+
+@partial(nnx.jit, static_argnames=('cfg',))
+def variational_free_energy(
+    gating_model: nnx.Module,
+    theta_model: nnx.Module,
+    x: jax.Array,
+    y: jax.Array,
+    t: jax.Array,
     cfg: DictConfig
-) -> tuple[TrainState, TrainState, Scalar, Array]:
+) -> tuple[jax.Array, jax.Array]:
     """
     """
+    # region AUXILIARY
     # mask classifier
     masks = jnp.zeros(shape=(y.size, len(cfg.dataset.train_files)), dtype=jnp.int32)  # (batch, num_experts)
     masks = jnp.concatenate(
@@ -246,90 +213,87 @@ def expectation_maximisation(
         x=annotations,
         num_classes=cfg.dataset.num_classes
     )  # (batch, num_experts + 1, num_classes)
+    # endregion
 
-    def variational_free_energy(
-        gating_params: FrozenDict,
-        theta_params: FrozenDict
-    ) -> tuple[Scalar, tuple[FrozenDict, FrozenDict, Array]]:
-        """
-        """
-        logits_z_x, batch_stats_gating = gating_state.apply_fn(
-            variables={'params': gating_params, 'batch_stats': gating_state.batch_stats},
-            x=x,
-            train=True,
-            mutable=['batch_stats']
+    logits_z_x = gating_model(x)
+    log_p_z_x = jax.nn.log_softmax(x=logits_z_x, axis=-1)  # (batch, num_experts + 1)
+
+    logits_t_x = vmap_forward(model=theta_model, x=x)
+    logits_t_x = jnp.swapaxes(a=logits_t_x, axis1=0, axis2=1)  # (batch, num_experts + 1, num_classes)
+    log_p_t_x = jax.nn.log_softmax(x=logits_t_x, axis=-1)  # (num_experts + 1, batch, num_classes)
+
+    # region E STEP
+    q_z, q_t = jax.lax.stop_gradient(
+        x=unconstrained_posteriors(
+            log_p_z_x=log_p_z_x,
+            log_p_t_x=log_p_t_x,
+            y=y,
+            t=t,
+            num_classes=cfg.dataset.num_classes,
+            num_experts=len(cfg.dataset.train_files),
+            num_iterations=cfg.training.num_fixed_point_iterations
         )
-        log_p_z_x = jax.nn.log_softmax(x=logits_z_x, axis=-1)  # (batch, num_experts + 1)
+    )
 
-        logits_t_x, batch_stats_theta = theta_state.apply_fn(
-            theta_params,
-            theta_state.batch_stats,
-            x,
-            True
-        )
-        logits_t_x = jnp.swapaxes(a=logits_t_x, axis1=0, axis2=1)  # (batch, num_experts + 1, num_classes)
-        log_p_t_x = jax.nn.log_softmax(x=logits_t_x, axis=-1)  # (num_experts + 1, batch, num_classes)
+    # initialise the parameters of lower and upper constraints
+    epsilon_lower = jnp.array(
+        object=cfg.hparams.epsilon_lower,
+        dtype=jnp.float32
+    )  # (num_experts + 1,)
+    epsilon_upper = jnp.array(
+        object=cfg.hparams.epsilon_upper,
+        dtype=jnp.float32
+    )  # (num_epxerts + 1,)
 
-        # region E STEP
-        q_z, q_t = jax.lax.stop_gradient(
-            x=unconstrained_posteriors(
-                log_p_z_x=log_p_z_x,
-                log_p_t_x=log_p_t_x,
-                y=y,
-                t=t,
-                num_classes=cfg.dataset.num_classes,
-                num_experts=len(cfg.dataset.train_files),
-                num_iterations=cfg.training.num_fixed_point_iterations
-            )
-        )
+    q_z_con = constrained_posterior(
+        q_z_uncon=q_z,
+        epsilon_upper=epsilon_upper,
+        epsilon_lower=epsilon_lower,
+    )
+    # endregion
 
-        # initialise the parameters of lower and upper constraints
-        epsilon_lower = jnp.array(
-            object=cfg.hparams.epsilon_lower,
-            dtype=jnp.float32
-        )  # (num_experts + 1,)
-        epsilon_upper = jnp.array(
-            object=cfg.hparams.epsilon_upper,
-            dtype=jnp.float32
-        )  # (num_epxerts + 1,)
+    # q_t for classifier is the ground truth labels
+    q_t = q_t * (1 - masks) + masks * annotations_one_hot
+    loss_t = optax.losses.softmax_cross_entropy(logits=logits_t_x, labels=q_t)
+    loss_t = jnp.sum(a=loss_t, axis=-1)  # (batch,)
+    loss_t = jnp.mean(a=loss_t, axis=0)
 
-        q_z_con = constrained_posterior(
-            q_z_uncon=q_z,
-            epsilon_upper=epsilon_upper,
-            epsilon_lower=epsilon_lower,
-        )
-        # endregion
+    loss_z = optax.losses.softmax_cross_entropy(logits=logits_z_x, labels=q_z_con)
+    loss_z = jnp.mean(a=loss_z)
 
-        # q_t for classifier is the ground truth labels
-        q_t = q_t * (1 - masks) + masks * annotations_one_hot
-        loss_t = optax.losses.softmax_cross_entropy(logits=logits_t_x, labels=q_t)
-        loss_t = jnp.sum(a=loss_t, axis=-1)  # (batch,)
-        loss_t = jnp.mean(a=loss_t, axis=0)
+    loss = loss_t + loss_z
 
-        loss_z = optax.losses.softmax_cross_entropy(logits=logits_z_x, labels=q_z_con)
-        loss_z = jnp.mean(a=loss_z)
+    return loss, log_p_z_x
 
-        loss = loss_t + loss_z
 
-        return loss, (batch_stats_gating, batch_stats_theta, log_p_z_x)
-
-    grad_value_fn = jax.value_and_grad(
-        fun=variational_free_energy,
+@partial(nnx.jit, static_argnames=('cfg',), donate_argnames=('gating_state', 'theta_state'))
+def expectation_maximisation(
+    x: jax.Array,
+    y: jax.Array,
+    t: jax.Array,
+    gating_state: nnx.Optimizer,
+    theta_state: nnx.Optimizer,
+    cfg: DictConfig
+) -> tuple[nnx.Optimizer, nnx.Optimizer, jax.Array, jax.Array]:
+    """
+    """
+    grad_value_fn = nnx.value_and_grad(
+        f=variational_free_energy,
         argnums=range(2),
         has_aux=True
     )
-    (loss, (batch_stats_gating, batch_stats_theta, log_p_z_x)), (grads_gating, grads_theta) = grad_value_fn(
-        gating_state.params,
-        theta_state.params
+    (loss, log_p_z_x), (grads_gating, grads_theta) = grad_value_fn(
+        gating_state.model,
+        theta_state.model,
+        x,
+        y,
+        t,
+        cfg
     )
 
     # update parameters from gradients
-    gating_state = gating_state.apply_gradients(grads=grads_gating)
-    theta_state = theta_state.apply_gradients(grads=grads_theta)
-
-    # update batch statistics
-    gating_state = gating_state.replace(batch_stats=batch_stats_gating['batch_stats'])
-    theta_state = theta_state.replace(batch_stats=batch_stats_theta['batch_stats'])
+    gating_state.update(grads=grads_gating)
+    theta_state.update(grads=grads_theta)
     # endregion
 
     # return grads_gating, batch_stats_gating, grads_theta, batch_stats_theta, loss
@@ -338,10 +302,10 @@ def expectation_maximisation(
 
 def train(
     dataset: dx._c.Buffer,
-    gating_state: TrainState,
-    theta_state: TrainState,
+    gating_state: nnx.Optimizer,
+    theta_state: nnx.Optimizer,
     cfg: DictConfig
-) -> tuple[TrainState, TrainState, Scalar, Array]:
+) -> tuple[nnx.Optimizer, nnx.Optimizer, jax.Array, jax.Array]:
     """the main training procedure
     """
     # batching and shuffling the dataset
@@ -358,8 +322,8 @@ def train(
     )
 
     # metric to track the training loss
-    loss_accum = metrics.Average()
-    p_z_x_accum = [metrics.Average() for _ in range(len(cfg.dataset.train_files) + 1)]
+    loss_accum = nnx.metrics.Average()
+    p_z_x_accum = [nnx.metrics.Average() for _ in range(len(cfg.dataset.train_files) + 1)]
 
     for samples in tqdm(
         iterable=dset,
@@ -401,37 +365,27 @@ def train(
     )
 
 
-@jax.jit
-def gating_prediction_step(x: Array, state: TrainState) -> Array:
+@nnx.jit
+def gating_prediction_step(x: jax.Array, model: nnx.Module) -> jax.Array:
     """
     """
-    logits, _ = state.apply_fn(
-        variables={'params': state.params, 'batch_stats': state.batch_stats},
-        x=x,
-        train=False,  # prediction
-        mutable=['batch_stats']
-    )
+    logits = model(x)
     return logits
 
 
-@jax.jit
-def expert_prediction_step(x: Array, theta_state: TrainState) -> Array:
-    logits, _ = theta_state.apply_fn(
-        theta_state.params,
-        theta_state.batch_stats,
-        x,
-        False
-    )  # (num_experts, batch_size, num_classes)
+@nnx.jit
+def expert_prediction_step(x: jax.Array, model: nnx.Optimizer) -> jax.Array:
+    logits = vmap_forward(model=model, x=x)  # (num_experts, batch_size, num_classes)
 
     return logits
 
 
 def evaluate(
     dataset: dx._c.Buffer,
-    gating_state: TrainState,
-    theta_state: TrainState,
+    gating_state: nnx.Optimizer,
+    theta_state: nnx.Optimizer,
     cfg: DictConfig
-) -> tuple[float, list[float], Scalar, list[float], float, Array]:
+) -> tuple[float, list[float], jax.Array, list[float], float, jax.Array]:
     """evaluate performance on a dataset
 
     Args:
@@ -465,10 +419,10 @@ def evaluate(
         prob_random_h_flip=cfg.hparams.prob_random_h_flip
     )
 
-    p_z_accum = [metrics.Average() for _ in range(len(cfg.dataset.test_files) + 1)]
-    accuracy_accum = metrics.Accuracy()
-    expert_accuracies = [metrics.Accuracy() for _ in range(len(cfg.dataset.test_files) + 1)]
-    coverage = metrics.Average()
+    p_z_accum = [nnx.metrics.Average() for _ in range(len(cfg.dataset.test_files) + 1)]
+    accuracy_accum = nnx.metrics.Accuracy()
+    expert_accuracies = [nnx.metrics.Accuracy() for _ in range(len(cfg.dataset.test_files) + 1)]
+    coverage = nnx.metrics.Average()
     preds_accum = []  # store prediction to calculate ECE
     labels_true = []
 
@@ -495,7 +449,7 @@ def evaluate(
         t = jax.nn.one_hot(x=t, num_classes=cfg.dataset.num_classes)  # (batch_size, num_experts, num_classes)
 
         # Pr(z | x, gamma)
-        logits_p_z = gating_prediction_step(x=x, state=gating_state)  # (batch_size, num_experts)
+        logits_p_z = gating_prediction_step(x=x, model=gating_state.model)  # (batch_size, num_experts)
         if jnp.isnan(logits_p_z).any():
             logging.error(msg=gating_state.params)
             logging.error(msg=gating_state.batch_stats)
@@ -510,7 +464,7 @@ def evaluate(
         coverage.update(values=(selected_expert_ids == len(cfg.dataset.test_files)) * 1)
 
         # accuracy
-        logits_p_t = expert_prediction_step(x=x, theta_state=theta_state)
+        logits_p_t = expert_prediction_step(x=x, model=theta_state.model)
         logits_clf = logits_p_t[-1, :, :]  # (batch_size, num_classes)
         human_and_model_predictions = jnp.concatenate(arrays=(t, logits_clf[:, None, :]), axis=1)
         queried_predictions = human_and_model_predictions[jnp.arange(len(x)), selected_expert_ids, :]

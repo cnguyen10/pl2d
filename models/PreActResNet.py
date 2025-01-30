@@ -1,344 +1,309 @@
 import jax
 import jax.numpy as jnp
-from flax import linen as nn
-from flax.core.frozen_dict import FrozenDict, freeze, unfreeze
-from flax.traverse_util import flatten_dict, unflatten_dict
+from flax import nnx
 
-from functools import partial
-
-from typing import Any, Sequence, Optional
-import chex
+from typing import Sequence
 
 
-class BasicBlock(nn.Module):
-    in_planes: int
-    planes: int
-    stride: int = 1
-    expansion: int = 1
-    train: Optional[bool] = None
-    dtype: jnp.dtype = jnp.float32
+class BasicBlock(nnx.Module):
+    def __init__(
+            self,
+            rngs: nnx.Rngs,
+            in_planes: int,
+            planes: int,
+            stride: int = 1,
+            expansion: int = 1,
+            dtype: jnp.dtype = jnp.float32) -> None:
+        super().__init__()
+        self.expansion = expansion
 
-    @nn.compact
-    def __call__(self, x: chex.Array, train: Optional[bool] = None) -> Any:
-        # train = nn.merge_param(name='train', a=self.train, b=train)
-
-        if self.stride != 1 or self.in_planes != (self.expansion * self.planes):
-            shortcut = nn.Conv(
-                features=self.expansion * self.planes,
+        if stride != 1 or in_planes != (expansion * planes):
+            self.shortcut = nnx.Conv(
+                in_features=in_planes,
+                out_features=expansion * self.planes,
                 kernel_size=(1, 1),
-                strides=self.stride,
+                strides=stride,
                 use_bias=False,
-                dtype=self.dtype
-            )(inputs=x)
+                dtype=dtype,
+                rngs=rngs
+            )
         else:
-            shortcut = x
-
-        out = nn.Conv(
-            features=self.planes,
+            self.shortcut = lambda x: x
+        
+        self.conv1 = nnx.Conv(
+            in_features=in_planes,
+            out_features=planes,
             kernel_size=(3, 3),
-            strides=self.stride,
+            strides=stride,
             padding=1,
             use_bias=False,
-            dtype=self.dtype
-        )(inputs=x)
-        out = nn.BatchNorm(use_running_average=not train)(x=out)
-        out = nn.relu(x=out)
-
-        out = nn.Conv(
-            features=self.planes,
+            dtype=dtype,
+            rngs=rngs
+        )
+        self.bn1 = nnx.BatchNorm(num_features=planes, rngs=rngs)
+        
+        self.conv2 = nnx.Conv(
+            in_features=planes,
+            out_features=planes,
             kernel_size=(3, 3),
             strides=1,
             padding=1,
             use_bias=False,
-            dtype=self.dtype
-        )(inputs=out)
-        out = nn.BatchNorm(use_running_average=not train)(x=out)
+            dtype=dtype,
+            rngs=rngs
+        )
+        self.bn2 = nnx.BatchNorm(num_features=planes, rngs=rngs)
 
-        out = out + shortcut
 
-        out = nn.relu(x=out)
+    def __call__(self, x: jax.Array) -> jax.Array:
+        out = self.conv1(inputs=x)
+        out = self.bn1(x=out)
+        out = nnx.relu(x=out)
+
+        out = self.conv2(inputs=out)
+        out = self.bn2(x=out)
+        out = out + self.shortcut(x)
+        out = nnx.relu(x=out)
 
         return out
 
 
-class PreActBlock(nn.Module):
-    """Pre-activation version of the Basic Block"""
-    in_planes: int
-    planes: int
-    stride: int = 1
-    expansion: int = 1
-    train: Optional[bool] = None
-    dtype: jnp.dtype = jnp.float32
+class PreActBlock(nnx.Module):
+    def __init__(
+            self,
+            rngs: nnx.Rngs,
+            in_planes: int,
+            planes: int,
+            stride: int = 1,
+            expansion: int = 1,
+            dtype: jnp.dtype = jnp.float32) -> None:
+        super().__init__()
+        self.expansion = expansion
 
-    @nn.compact
-    def __call__(self, x: chex.Array, train: Optional[bool] = None) -> Any:
-        # train = nn.merge_param(name='train', a=self.train, b=train)
-
-        out = nn.BatchNorm(use_running_average=not train)(x=x)
-        out = nn.relu(x=out)
-
-        out = nn.Conv(
-            features=self.planes,
+        self.bn1 = nnx.BatchNorm(num_features=in_planes, rngs=rngs)
+        self.conv1 = nnx.Conv(
+            in_features=in_planes,
+            out_features=planes,
             kernel_size=(3, 3),
-            strides=self.stride,
+            strides=stride,
             padding=1,
             use_bias=False,
-            dtype=self.dtype
-        )(inputs=x)
-        out = nn.BatchNorm(use_running_average=not train)(x=out)
-        out = nn.relu(x=out)
+            dtype=dtype,
+            rngs=rngs
+        )
 
-        out = nn.Conv(
-            features=self.planes,
+        self.bn2 = nnx.BatchNorm(num_features=planes, rngs=rngs)
+        self.conv2 = nnx.Conv(
+            in_features=planes,
+            out_features=planes,
             kernel_size=(3, 3),
             strides=1,
             padding=1,
             use_bias=False,
-            dtype=self.dtype
-        )(inputs=out)
+            dtype=dtype,
+            rngs=rngs
+        )
 
-        if self.stride != 1 or self.in_planes != (self.expansion * self.planes):
-            shortcut = nn.BatchNorm(use_running_average=not train)(x=x)
-            shortcut = nn.relu(x=shortcut)
-            shortcut = nn.Conv(
-                features=self.expansion * self.planes,
+        if stride != 1 or in_planes != (expansion * planes):
+            self.shortcut = nnx.Conv(
+                in_features=in_planes,
+                out_features=expansion * planes,
                 kernel_size=(1, 1),
-                strides=self.stride,
+                strides=stride,
                 use_bias=False,
-                dtype=self.dtype
-            )(inputs=shortcut)
+                dtype=dtype,
+                rngs=rngs
+            )
         else:
-            shortcut = x
-
-        out = out + shortcut
-
-        return out
+            self.shortcut = lambda x: x
 
 
-class PreActBottleneck(nn.Module):
-    """Pre-activation version of the original Bottleneck module."""
-    in_planes: int  # number of input channels
-    planes: int  # number of output channels
-    stride: int
-    expansion: int = 4
-    dtype: jnp.dtype = jnp.float32
+    def __call__(self, x: jax.Array) -> jax.Array:
+        out = self.bn1(x=x)
+        out = nnx.relu(x=out)
 
-    @nn.compact
-    def __call__(self, x: chex.Array, train: Optional[bool] = None) -> chex.Array:
-        # train = nn.merge_param(name='train', a=self.train, b=train)
+        shortcut = self.shortcut(out)
+
+        out = self.conv1(inputs=out)
+
+        out = self.bn2(x=out)
+        out = nnx.relu(x=out)
+        out = self.conv2(inputs=out)
+
+        return out + shortcut
+
+
+class PreActBottleneck(nnx.Module):
+    def __init__(
+            self,
+            rngs: nnx.Rngs,
+            in_planes: int,  # number of input channels
+            planes: int,  # number of output channels
+            stride: int,
+            expansion: int = 4,
+            dtype: jnp.dtype = jnp.float32) -> None:
+        super().__init__()
+        self.expansion = expansion
 
         if self.stride != 1 or self.in_planes != self.expansion * self.planes:
-            shortcut = nn.Conv(
-                features=self.expansion * self.planes,
+            self.shortcut = nnx.Conv(
+                in_features=in_planes,
+                out_features=expansion * planes,
                 kernel_size=(1, 1),
-                strides=self.stride,
+                strides=stride,
                 use_bias=False,
-                dtype=self.dtype
-            )(inputs=x)
+                dtype=dtype,
+                rngs=rngs
+            )
         else:
-            shortcut = x
-
-        out = nn.Conv(
-            features=self.planes,
+            self.shortcut = lambda x: x
+        
+        self.conv1 = nnx.Conv(
+            in_features=in_planes,
+            out_features=planes,
             kernel_size=(1, 1),
             strides=1,
             padding=0,
             use_bias=False,
-            dtype=self.dtype
-        )(inputs=x)
-        out = nn.BatchNorm(use_running_average=not train)(x=out)
-        out = nn.relu(x=out)
+            dtype=dtype,
+            rngs=rngs
+        )
+        self.bn1 = nnx.BatchNorm(num_features=planes, rngs=rngs)
 
-        out = nn.Conv(
-            features=self.planes,
+        self.conv2 = nnx.Conv(
+            in_features=planes,
+            out_features=planes,
             kernel_size=(3, 3),
-            strides=self.stride,
+            strides=stride,
             padding=1,
             use_bias=False,
-            dtype=self.dtype
-        )(inputs=out)
-        out = nn.BatchNorm(use_running_average=not train)(x=out)
-        out = nn.relu(x=out)
+            dtype=dtype,
+            rngs=rngs
+        )
+        self.bn2 = nnx.BatchNorm(num_features=planes, rngs=rngs)
 
-        out = nn.Conv(
-            features=self.expansion * self.planes,
+        self.conv3 = nnx.Conv(
+            in_features=planes,
+            out_features=expansion * planes,
             kernel_size=(1, 1),
             use_bias=False,
-            dtype=self.dtype
-        )(inputs=out)
-        out = nn.BatchNorm(use_running_average=not train)(x=out)
+            dtype=dtype,
+            rngs=rngs
+        )
+        self.bn3 = nnx.BatchNorm(num_features=expansion * planes, rngs=rngs)
 
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        shortcut = self.shortcut(x)
+
+        out = self.conv1(inputs=x)
+        out = self.bn1(x=out)
+        out = nnx.relu(x=out)
+
+        out = self.conv2(inputs=out)
+        out = self.bn2(x=out)
+        out = nnx.relu(x=out)
+
+        out = self.conv3(inputs=out)
+        out = self.bn3(x=out)
         out = out + shortcut
-
-        out = nn.relu(x=out)
+        out = nnx.relu(x=out)
 
         return out
 
 
-class PreActResNetFeature(nn.Module):
-    """Extract features from a Resnet
-    """
-    block: PreActBlock | PreActBottleneck
-    num_blocks: Sequence[int]
-    in_planes: int = 64
-    train: bool | None = None
-    dtype: jnp.dtype = jnp.float32
+class PreActResNet(nnx.Module):
+    def __init__(
+            self,
+            rngs: nnx.Rngs,
+            block: PreActBlock | PreActBottleneck,
+            num_blocks: Sequence[int],
+            in_planes: int = 64,
+            num_classes: int = None,
+            dtype: jnp.dtype = jnp.float32) -> None:
+        super().__init__()
 
-    @nn.compact
-    def __call__(self, x: chex.Array, train: Optional[bool] = None) -> chex.Array:
-        # train = nn.merge_param(name='train', a=self.train, b=train)
-
-        out = nn.Conv(
-            features=64,
+        self.conv1 = nnx.Conv(
+            in_features=3,
+            out_features=64,
             kernel_size=(3, 3),
             strides=1,
             padding=1,
             use_bias=False,
-            dtype=self.dtype
-        )(inputs=x)
-        out = nn.BatchNorm(use_running_average=not train)(x=out)
-        out = nn.relu(x=out)
-
-        in_planes, layer1 = make_layer(
-            block=self.block,
-            in_planes=self.in_planes,
-            planes=64,
-            num_blocks=self.num_blocks[0],
-            stride=1,
-            train=train,
-            dtype=self.dtype
+            dtype=dtype,
+            rngs=rngs
         )
-        in_planes, layer2 = make_layer(
-            block=self.block,
-            in_planes=in_planes,
-            planes=128,
-            num_blocks=self.num_blocks[1],
-            stride=2,
-            train=train,
-            dtype=self.dtype
-        )
-        in_planes, layer3 = make_layer(
-            block=self.block,
-            in_planes=in_planes,
-            planes=256,
-            num_blocks=self.num_blocks[2],
-            stride=2,
-            train=train,
-            dtype=self.dtype
-        )
-        _, layer4 = make_layer(
-            block=self.block,
-            in_planes=in_planes,
-            planes=512,
-            num_blocks=self.num_blocks[3],
-            stride=2,
-            train=train,
-            dtype=self.dtype
-        )
+        self.bn1 = nnx.BatchNorm(num_features=in_planes, rngs=rngs)
 
-        out = layer1(out)
-        out = layer2(out)
-        out = layer3(out)
-        out = layer4(out)
-
-        out = out.mean(axis=(1, 2))
-
-        return out
-
-
-class Classifier(nn.Module):
-    num_classes: int
-    dtype: jnp.dtype = jnp.float32
-
-    @nn.compact
-    def __call__(self, x: chex.Array) -> chex.Array:
-        out = nn.Dense(features=self.num_classes, dtype=self.dtype)(inputs=x)
-        return out
-
-
-class PreActResNet(nn.Module):
-    block: PreActBlock | PreActBottleneck
-    num_blocks: Sequence[int]
-    num_classes: int = 10
-    in_planes: int = 64
-    dtype: jnp.dtype = jnp.float32
-
-    def setup(self) -> None:
-        self.features = PreActResNetFeature(
-            block=self.block,
-            num_blocks=self.num_blocks,
-            in_planes=self.in_planes,
-            dtype=self.dtype
-        )
-        self.classifier = Classifier(
-            num_classes=self.num_classes,
-            dtype=self.dtype
-        )
-        return None
-    
-    def init_weights(self, rng: jax.random.PRNGKey, input_shape: tuple, params: FrozenDict = None) -> FrozenDict:
-        # init input tensors
-        pixel_values = jnp.zeros(input_shape, dtype=self.dtype)
-
-        rngs = {"params": rng}
-
-        random_params = self.init(rngs, pixel_values)
-
-        if params is not None:
-            random_params = flatten_dict(unfreeze(random_params))
-            params = flatten_dict(unfreeze(params))
-            for missing_key in self._missing_keys:
-                params[missing_key] = random_params[missing_key]
-            self._missing_keys = set()
-            return freeze(unflatten_dict(params))
+        planes = [64, 128, 256, 512]
+        self.layers = [None] * len(num_blocks)
+        for i in range(len(num_blocks)):
+            in_planes, self.layers[i] = make_layer(
+                rngs=rngs,
+                block=block,
+                in_planes=in_planes,
+                planes=planes[i],
+                num_blocks=num_blocks[i],
+                stride=min(i + 1, 2),
+                dtype=dtype
+            )
+        
+        if num_classes is None:
+            self.clf = lambda x: x
         else:
-            return random_params
+            self.clf = nnx.Linear(
+                in_features=int(512 * in_planes / planes[-1]),
+                out_features=num_classes,
+                rngs=rngs
+            )
 
-    def __call__(self, x: chex.Array, train: Optional[bool] = None) -> chex.Array:
-        out = self.features(x=x, train=train)
-        out = self.classifier(x=out)
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        out = self.conv1(inputs=x)
+        out = self.bn1(x=out)
+        out = nnx.relu(x=out)
+
+        for i in range(len(self.layers)):
+            out = self.layers[i](out)
+        
+        out = jnp.mean(a=out, axis=(1, 2))
+
+        out = self.clf(out)
+
         return out
 
 
-def ResNet(num_blocks: Sequence[int], num_classes: int, dtype: jnp.dtype = jnp.float32) -> PreActResNet:
+def ResNet18(num_classes: int, rngs: nnx.Rngs, dtype: jnp.dtype = jnp.float32) -> PreActResNet:
     return PreActResNet(
+        rngs=rngs,
         block=PreActBlock,
-        num_blocks=num_blocks,
+        num_blocks=(2, 2, 2, 2),
         num_classes=num_classes,
         dtype=dtype
     )
 
 
-def ResNet10(num_classes: int, dtype: jnp.dtype = jnp.float32) -> PreActResNet:
-    return ResNet(num_blocks=(1, 1, 1, 1), num_classes=num_classes, dtype=dtype)
-
-
-def ResNet18(num_classes: int, input_shape: tuple[int, int, int, int] = (1, 32, 32, 3), dtype: jnp.dtype = jnp.float32) -> PreActResNet:
-    return ResNet(num_blocks=(2, 2, 2, 2), num_classes=num_classes, dtype=dtype)
-
-
 def make_layer(
-    block: PreActBlock | PreActBottleneck,
-    in_planes: int,
-    planes: int,
-    num_blocks: Sequence[int],
-    stride: int,
-    train: bool,
-    dtype: jnp.dtype = jnp.float32
-) -> tuple[int, nn.Module]:
+        block: PreActBlock | PreActBottleneck,
+        in_planes: int,
+        planes: int,
+        num_blocks: Sequence[int],
+        stride: int,
+        rngs: nnx.Rngs,
+        dtype: jnp.dtype = jnp.float32) -> tuple[int, nnx.Module]:
+    """
+    """
     strides = [stride] + [1] * (num_blocks - 1)
     layers = []
     for stride in strides:
-        layers.append(
-            partial(
-                block,
-                in_planes=in_planes,
-                planes=planes,
-                stride=stride,
-                train=train,
-                dtype=dtype
-            )()
+        block_layer = block(
+            rngs=rngs,
+            in_planes=in_planes,
+            planes=planes,
+            stride=stride,
+            dtype=dtype
         )
-        in_planes = planes * block.expansion
+        layers.append(block_layer)
+        in_planes = planes * block_layer.expansion
 
-    return in_planes, nn.Sequential(layers=layers)
+    return in_planes, nnx.Sequential(*layers)
