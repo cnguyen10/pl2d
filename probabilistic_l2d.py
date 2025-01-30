@@ -325,6 +325,10 @@ def train(
     loss_accum = nnx.metrics.Average()
     p_z_x_accum = [nnx.metrics.Average() for _ in range(len(cfg.dataset.train_files) + 1)]
 
+    # set train mode
+    gating_state.model.train()
+    theta_state.model.train()
+
     for samples in tqdm(
         iterable=dset,
         desc='train',
@@ -429,6 +433,10 @@ def evaluate(
     # confusion matrix
     conf_pred = []  # store 0: clf is not selected, while 1: clf is selected
     conf_gt = []  # store 0: clf is incorrect, or 1: clf is correct
+
+    # set evaluation mode
+    gating_state.model.eval()
+    theta_state.model.eval()
 
     for samples in tqdm(
         iterable=dset,
