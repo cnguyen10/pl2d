@@ -91,7 +91,7 @@ def main(cfg: DictConfig) -> None:
     )
     data_source_test = ImageDataSource(
         annotation_files=cfg.dataset.test_files,
-        ground_truth_file=cfg.dataset.train_ground_truth_file,
+        ground_truth_file=cfg.dataset.test_ground_truth_file,
         root=cfg.dataset.root
     )
     # endregion
