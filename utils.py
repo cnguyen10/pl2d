@@ -127,7 +127,7 @@ class ImageDataSource(grain.RandomAccessDataSource):
         """
         # load images
         x = Image.open(fp=os.path.join(self.root, self._data[idx]['file']))
-        x = np.array(object=x, dtype=np.float32)
+        x = np.array(object=x)
 
         y = np.array(object=self._data[idx]['ground_truth'], dtype=np.int32)
         t = np.array(object=self._data[idx]['label'], dtype=np.int32)
