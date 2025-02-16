@@ -17,14 +17,16 @@ dataset:
   - ${dataset.root}/annotations_3/label_B_test.json
   # - ${dataset.root}/annotations_3/label_C_test.json
   test_ground_truth_file: ${dataset.root}/annotations_3/test.json
-  resized_shape: [256, 256]
-  crop_size: [224, 224]
 
 model:
   _partial_: True
   _target_: models.ResNet.resnet18
 
 hparams:
+  resize: [256, 256]
+  crop_size: [224, 224]
+  mean: null
+  std: null
   epsilon_lower: [0., 0., 0.]
   epsilon_upper: [1., 1., 0.2]
   clipped_norm: null

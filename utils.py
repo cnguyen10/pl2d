@@ -1,53 +1,20 @@
 import json
-import random
 import os
-import logging
 from functools import partial
-
-import numpy as np
-
 from tqdm import tqdm
 
-import mlx.data as dx
+import numpy as np
+from PIL import Image
 
 import jax
 import jax.numpy as jnp
-import optax
-import flax.linen as nn
-from flax.training import train_state
-from flax.core import FrozenDict
-from chex import Array, PRNGKey
 
-from models.ResNet import ResNet
+import grain.python as grain
 
 
-class TrainState(train_state.TrainState):
-    batch_stats: FrozenDict
-
-
-def make_dataset(
-    annotation_files: list[str],
-    ground_truth_file: str,
-    root: str = None,
-    shape: tuple[int, int] = None
-) -> dx._c.Buffer:
-    """make the dataset from multiple annotation files.
-
-    Each file may contain only a subset of the whole dataset.
-    If one annotator does not label a sample, the label will be set to -1.
-
-    Args:
-        annotation_files: list of pathes to the json files of annotators
-        ground_truth_file: path to the json file of ground truth
-        root: the directory to the dataset folder
-        shape: the new shape (width and height) of the resized image
-
-    Returns:
-        dataset:
+def combine_data(annotation_files: list[str], ground_truth_file: str) -> list[dict]:
     """
-    if len(annotation_files) < 1:
-        raise ValueError('len(annotation_files) <= 1, expecting len(annotation_files) > 1')
-
+    """
     # region DEFAULT VALUE OF MISSING ANNOTATION
     _missing_value: int = -1
     _is_one_hot: bool = False
@@ -113,8 +80,9 @@ def make_dataset(
     consolidation = []
 
     for filename in tqdm(iterable=ground_truth_annotations, desc='make dataset', ncols=80, leave=False):
-        file_path = os.path.join(root, filename) if root is not None else filename
-        record = dict(file=file_path.encode('ascii'), label=[], ground_truth=_missing_label)
+        # file_path = os.path.join(root, filename) if root is not None else filename
+        # record = dict(file=file_path.encode('ascii'), label=[], ground_truth=_missing_label)
+        record = dict(file=filename, label=[], ground_truth=_missing_label)
 
         for annotator in annotators:
             record['label'].append(annotator.get(filename, _missing_label))
@@ -123,92 +91,56 @@ def make_dataset(
         record['ground_truth'] = ground_truth_annotations.get(filename)
 
         consolidation.append(record)
-
-    # load image dataset without batching nor shuffling
-    dset = (
-        dx.buffer_from_vector(data=consolidation)
-        .load_image(key='file', output_key='image')
-    )
-
-    if shape is not None:
-        dset = dset.image_resize(key='image', w=shape[0], h=shape[1])
-
-    return dset
-
-
-def prepare_dataset(
-    dataset: dx._c.Buffer,
-    shuffle: bool,
-    batch_size: int,
-    prefetch_size: int,
-    num_threads: int,
-    mean: tuple[int, int, int] = None,
-    std: tuple[int, int, int] = None,
-    random_crop_size: tuple[int, int] = None,
-    prob_random_h_flip: float = None
-) -> dx._c.Buffer:
-    """batch, shuffle and convert from uint8 to float32 to train
-
-    Args:
-        dataset:
-        shuffle:
-        batch_size:
-        prefetch_size:
-        num_threads:
-        mean: the mean to normalised input samples (translation)
-        std: the standard deviation to normalised input samples (inverse scaling)
-    """
-    if shuffle:
-        dset = dataset.shuffle()
-    else:
-        dset = dataset
-
-    # region DATA AUGMENTATION
-    # randomly crop
-    if random_crop_size is not None:
-        dset = dset.pad(key='image', dim=0, lpad=4, rpad=4, pad_value=0)
-        dset = dset.pad(key='image', dim=1, lpad=4, rpad=4, pad_value=0)
-        dset = dset.image_random_crop(
-            key='image',
-            w=random_crop_size[0],
-            h=random_crop_size[1]
-        )
     
-    # randomly horizontal-flip
-    if prob_random_h_flip is not None:
-        if prob_random_h_flip < 0 or prob_random_h_flip > 1:
-            raise ValueError('Probability to randomly horizontal-flip must be in [0, 1]'
-                             ', but provided with {:f}'.format(prob_random_h_flip))
+    return consolidation
 
-        dset = dset.image_random_h_flip(key='image', prob=prob_random_h_flip)
-    
-    # normalisation
-    if (mean is None) or (std is None):
-        logging.info(
-            msg='mean and std must not be None. Found one or both of them are None.'
+
+class ImageDataSource(grain.RandomAccessDataSource):
+    def __init__(
+        self,
+        annotation_files: list[str],
+        ground_truth_file: str,
+        root: str = None
+    ) -> None:
+        """make the dataset from multiple annotation files.
+
+        Each file may contain only a subset of the whole dataset.
+        If one annotator does not label a sample, the label will be set to -1.
+
+        Args:
+            annotation_files: list of pathes to the json files of annotators
+            ground_truth_file: path to the json file of ground truth
+            root: the directory to the dataset folder
+            shape: the new shape (width and height) of the resized image
+
+        Returns:
+            dataset:
+        """
+        self.root = root if root is not None else ''
+        self._data = combine_data(
+            annotation_files=annotation_files,
+            ground_truth_file=ground_truth_file
         )
 
-        mean = 0.
-        std = 1.
-    
-    mean = np.array(object=mean, dtype=np.float32)
-    std = np.array(object=std, dtype=np.float32)
-        
-    dset = dset.key_transform(
-        key='image',
-        func=lambda x: (x.astype('float32') / 255 - mean) / std
-    )
-    # endregion
+    def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
+        """
+        """
+        # load images
+        x = Image.open(fp=os.path.join(self.root, self._data[idx]['file']))
+        x = np.array(object=x, dtype=np.float32)
 
-    # batching, converting to stream and return
-    dset = (
-        dset
-        .to_stream()
-        .batch(batch_size=batch_size)
-        .prefetch(prefetch_size=prefetch_size, num_threads=num_threads)
-    )
+        y = np.array(object=self._data[idx]['ground_truth'], dtype=np.int32)
+        t = np.array(object=self._data[idx]['label'], dtype=np.int32)
 
-    return dset
+        return dict(
+            filename=self._data[idx]['file'],
+            image=x,
+            label=t,
+            ground_truth=y
+        )
+
+    def __len__(self) -> int:
+        return len(self._data)
 
 
 @partial(jax.jit, static_argnames=('num_classes'))

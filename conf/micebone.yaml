@@ -2,7 +2,7 @@ dataset:
   name: micebone
   root: /sda2/datasets/MiceBone
   num_classes: 3
-  missing_rate: 0.3
+  missing_rate: 0.7
   train_files:
   - /sda2/datasets/MiceBone/splits_missing/Id_290_not_fold5_train_${dataset.missing_rate}.json
   - /sda2/datasets/MiceBone/splits_missing/Id_47_not_fold5_train_${dataset.missing_rate}.json
@@ -32,17 +32,17 @@ dataset:
   - /sda2/datasets/MiceBone/split_folds/Id_745_fold5.json
   - /sda2/datasets/MiceBone/split_folds/Id_966_fold5.json
   test_ground_truth_file: /sda2/datasets/MiceBone/split_folds/majority_vote_fold5.json
-  resized_shape: null
-  crop_size: [224, 224]
-  prob_random_h_flip: 0.5
-  mean: null
-  std: null
 
 model:
   _partial_: True
   _target_: models.ResNet.resnet18
 
 hparams:
+  resize: null
+  crop_size: [224, 224]
+  prob_random_h_flip: 0.5
+  mean: null
+  std: null
   epsilon_lower: [0., 0., 0., 0., 0., 0., 0., 0., 0.]
   epsilon_upper: [1., 1., 1., 1., 1., 1., 1., 1., 0.2]
   clipped_norm: null

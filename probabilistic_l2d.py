@@ -13,13 +13,20 @@ from tensorflow_probability.substrates import jax as tfp
 from jaxopt import ProjectedGradient
 from jaxopt.projection import projection_non_negative
 
-from omegaconf import DictConfig
+import grain.python as grain
 
-from mlx import data as dx
+from omegaconf import DictConfig
 
 from tqdm import tqdm
 
-from utils import prepare_dataset, confusion_matrix
+from utils import confusion_matrix
+from transformations import (
+    Resize,
+    RandomCrop,
+    RandomHorizontalFlip,
+    ToFloat,
+    Normalize
+)
 
 
 @jax.jit
@@ -301,25 +308,51 @@ def expectation_maximisation(
 
 
 def train(
-    dataset: dx._c.Buffer,
+    data_source: grain.RandomAccessDataSource,
     gating_state: nnx.Optimizer,
     theta_state: nnx.Optimizer,
     cfg: DictConfig
 ) -> tuple[nnx.Optimizer, nnx.Optimizer, jax.Array, jax.Array]:
     """the main training procedure
     """
-    # batching and shuffling the dataset
-    dset = prepare_dataset(
-        dataset=dataset,
+    # region DATA LOADER
+    index_sampler = grain.IndexSampler(
+        num_records=len(data_source),
+        num_epochs=1,
         shuffle=True,
-        batch_size=cfg.training.batch_size,
-        prefetch_size=cfg.data_loading.prefetch_size,
-        num_threads=cfg.data_loading.num_threads,
-        mean=cfg.dataset.mean,
-        std=cfg.dataset.std,
-        random_crop_size=cfg.dataset.crop_size,
-        prob_random_h_flip=cfg.hparams.prob_random_h_flip
+        shard_options=grain.NoSharding(),
+        seed=gating_state.step.value.item()  # set the random seed
     )
+
+    transformations = []
+    if cfg.hparams.resize is not None:
+        transformations.append(Resize(resize_shape=cfg.hparams.resize))
+    if cfg.hparams.crop_size is not None:
+        transformations.append(RandomCrop(crop_size=cfg.hparams.crop_size))
+    if cfg.hparams.prob_random_h_flip is not None:
+        transformations.append(RandomHorizontalFlip(p=cfg.hparams.prob_random_h_flip))
+    transformations.append(ToFloat())
+    if cfg.hparams.mean is not None and cfg.hparams.std is not None:
+        transformations.append(Normalize(mean=cfg.hparams.mean, std=cfg.hparams.std))
+    transformations.append(
+        grain.Batch(
+            batch_size=cfg.training.batch_size,
+            drop_remainder=True
+        )
+    )
+
+    data_loader = grain.DataLoader(
+        data_source=data_source,
+        sampler=index_sampler,
+        operations=transformations,
+        worker_count=cfg.data_loading.num_workers,
+        shard_options=grain.NoSharding(),
+        read_options=grain.ReadOptions(
+            num_threads=cfg.data_loading.num_threads,
+            prefetch_buffer_size=cfg.data_loading.prefetch_size
+        )
+    )
+    # endregion
 
     # metric to track the training loss
     loss_accum = nnx.metrics.Average()
@@ -330,9 +363,9 @@ def train(
     theta_state.model.train()
 
     for samples in tqdm(
-        iterable=dset,
+        iterable=data_loader,
         desc='train',
-        total=len(dataset) // cfg.training.batch_size + 1,
+        total=len(data_source) // cfg.training.batch_size,
         ncols=80,
         leave=False,
         position=2,
@@ -385,7 +418,7 @@ def expert_prediction_step(x: jax.Array, model: nnx.Optimizer) -> jax.Array:
 
 
 def evaluate(
-    dataset: dx._c.Buffer,
+    data_source: grain.RandomAccessDataSource,
     gating_state: nnx.Optimizer,
     theta_state: nnx.Optimizer,
     cfg: DictConfig
@@ -393,7 +426,7 @@ def evaluate(
     """evaluate performance on a dataset
 
     Args:
-        dataset:
+        data_source:
         gating_state:
         theta_state:
         cfg: Hydra/Omega configuration dictionary
@@ -410,18 +443,42 @@ def evaluate(
                 (i) 0 if the ML classifier is incorrect
                 (ii) 1 if the ML classifier is correct
     """
-    # prepare dataset for training
-    dset = prepare_dataset(
-        dataset=dataset,
+    # region DATA LOADER
+    index_sampler = grain.IndexSampler(
+        num_records=len(data_source),
+        num_epochs=1,
         shuffle=False,
-        batch_size=cfg.training.batch_size,
-        prefetch_size=cfg.data_loading.prefetch_size,
-        num_threads=cfg.data_loading.num_threads,
-        mean=cfg.dataset.mean,
-        std=cfg.dataset.std,
-        random_crop_size=cfg.dataset.crop_size,
-        prob_random_h_flip=cfg.hparams.prob_random_h_flip
+        shard_options=grain.NoSharding(),
+        seed=gating_state.step.value.item()  # set the random seed
     )
+
+    transformations = []
+    if cfg.hparams.resize is not None:
+        transformations.append(Resize(resize_shape=cfg.hparams.resize))
+    if cfg.hparams.crop_size is not None:
+        transformations.append(RandomCrop(crop_size=cfg.hparams.crop_size))
+    transformations.append(ToFloat())
+    if cfg.hparams.mean is not None and cfg.hparams.std is not None:
+        transformations.append(Normalize(mean=cfg.hparams.mean, std=cfg.hparams.std))
+    transformations.append(
+        grain.Batch(
+            batch_size=cfg.training.batch_size,
+            drop_remainder=False
+        )
+    )
+
+    data_loader = grain.DataLoader(
+        data_source=data_source,
+        sampler=index_sampler,
+        operations=transformations,
+        worker_count=cfg.data_loading.num_workers,
+        shard_options=grain.NoSharding(),
+        read_options=grain.ReadOptions(
+            num_threads=cfg.data_loading.num_threads,
+            prefetch_buffer_size=cfg.data_loading.prefetch_size
+        )
+    )
+    # endregion
 
     p_z_accum = [nnx.metrics.Average() for _ in range(len(cfg.dataset.test_files) + 1)]
     accuracy_accum = nnx.metrics.Accuracy()
@@ -439,9 +496,9 @@ def evaluate(
     theta_state.model.eval()
 
     for samples in tqdm(
-        iterable=dset,
+        iterable=data_loader,
         desc='evaluate',
-        total=len(dataset)//cfg.training.batch_size + 1,
+        total=len(data_source)//cfg.training.batch_size + 1,
         ncols=80,
         leave=False,
         position=2,

@@ -26,18 +26,16 @@ dataset:
     - ${dataset.root}/synthetic_expert/test_0_1_2_3_4_5_6_7_8_9.json
     - ${dataset.root}/synthetic_expert/test_10_11_12_13_14_15_16_17_18_19.json
   test_ground_truth_file: ${dataset.root}/test.json
-  resized_shape: null
-  crop_size: [32, 32]
-  # mean: [0.485, 0.456, 0.406]
-  # std: [0.229, 0.224, 0.225]
-  mean: null
-  std: null
 
 model:
   _partial_: True
   _target_: models.PreActResNet.ResNet18
 
 hparams:
+  resize: null
+  crop_size: [32, 32]
+  mean: null
+  std: null
   epsilon_lower: [0., 0., 0.]
-  epsilon_upper: [1., 1., 0.2]
+  epsilon_upper: [0.4, 0.4, 0.2]
   clipped_norm: 10

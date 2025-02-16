@@ -11,17 +11,17 @@ dataset:
   test_files:
     - /sda2/datasets/cxr8/expert/expert_test.json
   test_ground_truth_file: /sda2/datasets/cxr8/test.json
-  resized_shape: [256, 256]
-  crop_size: [224, 224]
-  prob_random_h_flip: 0.5
-  mean: null
-  std: null
 
 model:
   _partial_: True
   _target_: models.ResNet.resnet18
 
 hparams:
+  resize: [256, 256]
+  crop_size: [224, 224]
+  prob_random_h_flip: 0.5
+  mean: null
+  std: null
   epsilon_lower: [0., 0.]
   epsilon_upper: [1., 0.2]
   clipped_norm: null

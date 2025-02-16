@@ -19,9 +19,8 @@ import orbax.checkpoint as ocp
 
 import mlflow
 
-from utils import make_dataset
-
 from probabilistic_l2d import train, evaluate
+from utils import ImageDataSource
 
 
 def init_tx(
@@ -66,12 +65,6 @@ def init_tx(
 def main(cfg: DictConfig) -> None:
     """main procedure
     """
-    # region VALIDATE ARGS
-    # validate if the input files are the same as the number of experts
-    assert len(cfg.dataset.train_files) == len(cfg.dataset.train_complete_files)
-    assert len(cfg.dataset.train_files) == len(cfg.dataset.test_files)
-    # endregion
-
     # region JAX ENVIRONMENT
     jax.config.update('jax_disable_jit', cfg.jax.disable_jit)
     jax.config.update('jax_platforms', cfg.jax.platform)
@@ -84,19 +77,22 @@ def main(cfg: DictConfig) -> None:
     )
     # endregion
 
+    # region VALIDATE ARGS
+    # validate if the input files are the same as the number of experts
+    assert len(cfg.dataset.train_files) == len(cfg.dataset.train_complete_files)
+    assert len(cfg.dataset.train_files) == len(cfg.dataset.test_files)
+    # endregion
+
     # region DATASETS
-    dset_train = make_dataset(
+    data_source_train = ImageDataSource(
         annotation_files=cfg.dataset.train_files,
         ground_truth_file=cfg.dataset.train_ground_truth_file,
-        root=cfg.dataset.root,
-        shape=cfg.dataset.resized_shape
+        root=cfg.dataset.root
     )
-
-    dset_test = make_dataset(
+    data_source_test = ImageDataSource(
         annotation_files=cfg.dataset.test_files,
-        ground_truth_file=cfg.dataset.test_ground_truth_file,
-        root=cfg.dataset.root,
-        shape=cfg.dataset.resized_shape
+        ground_truth_file=cfg.dataset.train_ground_truth_file,
+        root=cfg.dataset.root
     )
     # endregion
 
@@ -113,7 +109,7 @@ def main(cfg: DictConfig) -> None:
     gating_state = nnx.Optimizer(
         model=gating_model,
         tx=init_tx(
-            dataset_length=len(dset_train),
+            dataset_length=len(data_source_train),
             lr=cfg.training.gating_lr,
             batch_size=cfg.training.batch_size,
             num_epochs=cfg.training.num_epochs,
@@ -142,7 +138,7 @@ def main(cfg: DictConfig) -> None:
     theta_state = nnx.Optimizer(
         model=theta_model,
         tx=init_tx(
-            dataset_length=len(dset_train),
+            dataset_length=len(data_source_train),
             lr=cfg.training.expert_lr,
             batch_size=cfg.training.batch_size,
             num_epochs=cfg.training.num_epochs,
@@ -231,7 +227,7 @@ def main(cfg: DictConfig) -> None:
                 disable=not cfg.data_loading.progress_bar
             ):
                 gating_state, theta_state, loss, p_z_train = train(
-                    dataset=dset_train,
+                    data_source=data_source_train,
                     gating_state=gating_state,
                     theta_state=theta_state,
                     cfg=cfg
@@ -250,7 +246,7 @@ def main(cfg: DictConfig) -> None:
                 )
 
                 accuracy, expert_accuracies, coverage, p_z, ece, conf_mat = evaluate(
-                    dataset=dset_test,
+                    data_source=data_source_test,
                     gating_state=gating_state,
                     theta_state=theta_state,
                     cfg=cfg
