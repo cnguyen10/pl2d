@@ -2,7 +2,7 @@
 
 ## Probabilistic learning to defer
 
-This repository provides an implementation of **Probabilistic Learning to Defer: Handling Missing Expert Annotations and Controlling Workload Distribution** presented (as an oral paper:speaking_head: :microphone:) at ICLR 2025 in Singapore :singapore:.
+This repository provides an implementation of **Probabilistic Learning to Defer: Handling Missing Expert Annotations and Controlling Workload Distribution** presented (as an oral paper) at ICLR 2025 in Singapore.
 
 ![visualisation](img/visualisation.png)
 *The visualisation of the proposed Prob-L2D in which the EM algorithm is used to infer the missing annotations of each sample.*
