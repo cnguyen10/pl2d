@@ -20,7 +20,7 @@ import orbax.checkpoint as ocp
 import mlflow
 
 from probabilistic_l2d import train, evaluate
-from utils import ImageDataSource
+from DataSource import ImageDataSource
 
 
 def init_tx(
