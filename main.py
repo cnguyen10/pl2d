@@ -21,44 +21,7 @@ import mlflow
 
 from probabilistic_l2d import train, evaluate
 from DataSource import ImageDataSource
-
-
-def init_tx(
-    dataset_length: int,
-    lr: float,
-    batch_size: int,
-    num_epochs: int,
-    weight_decay: float,
-    momentum: float,
-    clipped_norm: float | None
-) -> optax.GradientTransformationExtraArgs:
-    """initialize parameters of an optimizer
-    """
-     # add L2 regularisation(aka weight decay)
-    weight_decay = optax.masked(
-        inner=optax.add_decayed_weights(
-            weight_decay=weight_decay,
-            mask=None
-        ),
-        mask=lambda p: jax.tree_util.tree_map(lambda x: x.ndim != 1, p)
-    )
-
-    num_iters_per_epoch = dataset_length // batch_size
-    lr_schedule_fn = optax.cosine_decay_schedule(
-        init_value=lr,
-        decay_steps=(num_epochs + 10) * num_iters_per_epoch
-    )
-
-    # define an optimizer
-    tx = optax.chain(
-        weight_decay,
-        optax.add_noise(eta=0.01, gamma=0.55, seed=random.randint(a=0, b=100)),
-        optax.clip_by_global_norm(max_norm=clipped_norm) \
-            if clipped_norm is not None else optax.identity(),
-        optax.sgd(learning_rate=lr_schedule_fn, momentum=momentum)
-    )
-
-    return tx
+from utils import init_tx
 
 
 @hydra.main(version_base=None, config_path="./conf", config_name="conf")
