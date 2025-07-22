@@ -27,15 +27,27 @@ dataset:
     - ${dataset.root}/synthetic_expert/test_10_11_12_13_14_15_16_17_18_19.json
   test_ground_truth_file: ${dataset.root}/test.json
 
-model:
-  _partial_: True
-  _target_: models.PreActResNet.ResNet18
-
-hparams:
+data_augmentation:
   resize: null
+  padding_px: 4
   crop_size: [32, 32]
+  prob_random_flip: 0.5
   mean: null
   std: null
+
+model:
+  _partial_: True
+  _target_: models.ResNet.resnet18_preact
+  in_channels: 3  # color images: 3, black and white: 1
+  conv1_kernel_size: [3, 3]
+
+training:
+  gating_lr: 0.01
+  expert_lr: 0.01
+  batch_size: 128
+  num_epochs: 300
+  clipped_norm: 10
+
+hparams:
   epsilon_lower: [0., 0., 0.]
   epsilon_upper: [0.4, 0.4, 0.2]
-  clipped_norm: 10

@@ -1,5 +1,8 @@
 defaults:
-  - cifar100 # cifar100, chaoyang, micebone or nihao yaml-file in the folder "conf/"
+  - cifar100
+  # - chaoyang
+  # - micebone
+  # - nihao
   - override hydra/hydra_logging: disabled  
   - override hydra/job_logging: disabled
   - _self_
@@ -15,17 +18,12 @@ experiment:
   logdir: ./logdir
   run_id: null
 
-hparams:
-  prob_random_h_flip: 0.5
-
 training:
-  gating_lr: 0.01
-  expert_lr: 0.01
   num_fixed_point_iterations: 10
-  batch_size: 128
-  num_epochs: 300
   momentum: 0.9
   weight_decay: 0.0005
+  dropout_rate: 0.1
+  seed: 0
 
 data_loading:
   progress_bar: True

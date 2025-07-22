@@ -24,6 +24,24 @@ class Resize(grain.MapTransform):
         return element
 
 
+class CropAndPad(grain.MapTransform):
+    def __init__(self, px: int | list[int]) -> None:
+        super().__init__()
+        self.px = px
+
+    def map(self, element: dict[str, Any]) -> dict[str, np.ndarray]:
+        """
+        """
+        crop_and_pad_fn = A.CropAndPad(
+            px=self.px,
+            keep_size=False,  # do not resize back to the image's size
+        )
+
+        element['image'] = crop_and_pad_fn(image=element['image'])['image']
+
+        return element
+
+
 class RandomCrop(grain.RandomMapTransform):
     def __init__(self, crop_size: tuple[int, int]) -> None:
         super().__init__()

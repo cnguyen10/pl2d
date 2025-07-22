@@ -20,13 +20,6 @@ from omegaconf import DictConfig
 from tqdm import tqdm
 
 from utils import confusion_matrix
-from transformations import (
-    Resize,
-    RandomCrop,
-    RandomHorizontalFlip,
-    ToFloat,
-    Normalize
-)
 
 
 @jax.jit
@@ -308,52 +301,14 @@ def expectation_maximisation(
 
 
 def train(
-    data_source: grain.RandomAccessDataSource,
+    data_iterator: grain.DatasetIterator,
     gating_state: nnx.Optimizer,
     theta_state: nnx.Optimizer,
+    num_samples: int,
     cfg: DictConfig
-) -> tuple[nnx.Optimizer, nnx.Optimizer, jax.Array, jax.Array]:
+) -> tuple[nnx.Optimizer, nnx.Optimizer, jax.Array, list[jax.Array]]:
     """the main training procedure
     """
-    # region DATA LOADER
-    index_sampler = grain.IndexSampler(
-        num_records=len(data_source),
-        num_epochs=1,
-        shuffle=True,
-        shard_options=grain.NoSharding(),
-        seed=gating_state.step.value.item()  # set the random seed
-    )
-
-    transformations = []
-    if cfg.hparams.resize is not None:
-        transformations.append(Resize(resize_shape=cfg.hparams.resize))
-    if cfg.hparams.crop_size is not None:
-        transformations.append(RandomCrop(crop_size=cfg.hparams.crop_size))
-    if cfg.hparams.prob_random_h_flip is not None:
-        transformations.append(RandomHorizontalFlip(p=cfg.hparams.prob_random_h_flip))
-    transformations.append(ToFloat())
-    if cfg.hparams.mean is not None and cfg.hparams.std is not None:
-        transformations.append(Normalize(mean=cfg.hparams.mean, std=cfg.hparams.std))
-    transformations.append(
-        grain.Batch(
-            batch_size=cfg.training.batch_size,
-            drop_remainder=True
-        )
-    )
-
-    data_loader = grain.DataLoader(
-        data_source=data_source,
-        sampler=index_sampler,
-        operations=transformations,
-        worker_count=cfg.data_loading.num_workers,
-        shard_options=grain.NoSharding(),
-        read_options=grain.ReadOptions(
-            num_threads=cfg.data_loading.num_threads,
-            prefetch_buffer_size=cfg.data_loading.prefetch_size
-        )
-    )
-    # endregion
-
     # metric to track the training loss
     loss_accum = nnx.metrics.Average()
     p_z_x_accum = [nnx.metrics.Average() for _ in range(len(cfg.dataset.train_files) + 1)]
@@ -362,17 +317,17 @@ def train(
     gating_state.model.train()
     theta_state.model.train()
 
-    for samples in tqdm(
-        iterable=data_loader,
+    for _ in tqdm(
+        iterable=range(num_samples // cfg.training.batch_size),
         desc='train',
-        total=len(data_source) // cfg.training.batch_size,
         ncols=80,
         leave=False,
         position=2,
         colour='blue',
         disable=not cfg.data_loading.progress_bar
     ):
-        x = jnp.asarray(a=samples['image'], dtype=jnp.float32)  # input samples
+        samples = next(data_iterator)
+        x = jnp.asarray(a=samples['image'], dtype=jnp.bfloat16)  # input samples
         y = jnp.asarray(a=samples['ground_truth'], dtype=jnp.int32)  # true labels  (batch,)
         t = jnp.asarray(a=samples['label'], dtype=jnp.int32)  # annotated labels (batch, num_experts)
 
@@ -418,17 +373,19 @@ def expert_prediction_step(x: jax.Array, model: nnx.Optimizer) -> jax.Array:
 
 
 def evaluate(
-    data_source: grain.RandomAccessDataSource,
+    dataloader: grain.DataLoader,
     gating_state: nnx.Optimizer,
     theta_state: nnx.Optimizer,
+    num_samples: int,
     cfg: DictConfig
-) -> tuple[float, list[float], jax.Array, list[float], float, jax.Array]:
+) -> tuple[jax.Array, list[jax.Array], jax.Array, list[jax.Array], jax.Array, jax.Array]:
     """evaluate performance on a dataset
 
     Args:
-        data_source:
+        dataloader:
         gating_state:
         theta_state:
+        num_samples: the number of samples in the data loader
         cfg: Hydra/Omega configuration dictionary
 
     Returns:
@@ -443,43 +400,6 @@ def evaluate(
                 (i) 0 if the ML classifier is incorrect
                 (ii) 1 if the ML classifier is correct
     """
-    # region DATA LOADER
-    index_sampler = grain.IndexSampler(
-        num_records=len(data_source),
-        num_epochs=1,
-        shuffle=False,
-        shard_options=grain.NoSharding(),
-        seed=gating_state.step.value.item()  # set the random seed
-    )
-
-    transformations = []
-    if cfg.hparams.resize is not None:
-        transformations.append(Resize(resize_shape=cfg.hparams.resize))
-    if cfg.hparams.crop_size is not None:
-        transformations.append(RandomCrop(crop_size=cfg.hparams.crop_size))
-    transformations.append(ToFloat())
-    if cfg.hparams.mean is not None and cfg.hparams.std is not None:
-        transformations.append(Normalize(mean=cfg.hparams.mean, std=cfg.hparams.std))
-    transformations.append(
-        grain.Batch(
-            batch_size=cfg.training.batch_size,
-            drop_remainder=False
-        )
-    )
-
-    data_loader = grain.DataLoader(
-        data_source=data_source,
-        sampler=index_sampler,
-        operations=transformations,
-        worker_count=cfg.data_loading.num_workers,
-        shard_options=grain.NoSharding(),
-        read_options=grain.ReadOptions(
-            num_threads=cfg.data_loading.num_threads,
-            prefetch_buffer_size=cfg.data_loading.prefetch_size
-        )
-    )
-    # endregion
-
     p_z_accum = [nnx.metrics.Average() for _ in range(len(cfg.dataset.test_files) + 1)]
     accuracy_accum = nnx.metrics.Accuracy()
     expert_accuracies = [nnx.metrics.Accuracy() for _ in range(len(cfg.dataset.test_files) + 1)]
@@ -496,9 +416,9 @@ def evaluate(
     theta_state.model.eval()
 
     for samples in tqdm(
-        iterable=data_loader,
+        iterable=dataloader,
         desc='evaluate',
-        total=len(data_source)//cfg.training.batch_size + 1,
+        total=num_samples//cfg.training.batch_size + 1,
         ncols=80,
         leave=False,
         position=2,
@@ -516,8 +436,6 @@ def evaluate(
         # Pr(z | x, gamma)
         logits_p_z = gating_prediction_step(x=x, model=gating_state.model)  # (batch_size, num_experts)
         if jnp.isnan(logits_p_z).any():
-            logging.error(msg=gating_state.params)
-            logging.error(msg=gating_state.batch_stats)
             raise ValueError('NaN detected in the output of gating function.')
         log_p_z = jax.nn.log_softmax(x=logits_p_z, axis=-1)
 

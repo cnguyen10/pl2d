@@ -18,15 +18,27 @@ dataset:
   # - ${dataset.root}/annotations_3/label_C_test.json
   test_ground_truth_file: ${dataset.root}/annotations_3/test.json
 
+data_augmentation:
+  resize: [256, 256]
+  padding_px: null
+  crop_size: [224, 224]
+  prob_random_flip: 0.5
+  mean: null
+  std: null
+
 model:
   _partial_: True
   _target_: models.ResNet.resnet18
+  in_channels: 3  # color images: 3, black and white: 1
+  conv1_kernel_size: [7, 7]
+
+training:
+  gating_lr: 0.01
+  expert_lr: 0.01
+  batch_size: 128
+  num_epochs: 300
+  clipped_norm: null
 
 hparams:
-  resize: [256, 256]
-  crop_size: [224, 224]
-  mean: null
-  std: null
   epsilon_lower: [0., 0., 0.]
   epsilon_upper: [1., 1., 0.2]
-  clipped_norm: null

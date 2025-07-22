@@ -1,6 +1,5 @@
 import os
 from pathlib import Path
-import random
 
 from tqdm import tqdm
 
@@ -13,18 +12,16 @@ import jax.numpy as jnp
 from flax import nnx
 from flax.traverse_util import flatten_dict
 
-import optax
-
 import orbax.checkpoint as ocp
 
 import mlflow
 
 from probabilistic_l2d import train, evaluate
 from DataSource import ImageDataSource
-from utils import init_tx
+from utils import init_tx, initialize_dataloader
 
 
-@hydra.main(version_base=None, config_path="./conf", config_name="conf")
+@hydra.main(version_base=None, config_path='./conf', config_name='conf')
 def main(cfg: DictConfig) -> None:
     """main procedure
     """
@@ -33,11 +30,6 @@ def main(cfg: DictConfig) -> None:
     jax.config.update('jax_platforms', cfg.jax.platform)
 
     os.environ['XLA_PYTHON_CLIENT_MEM_FRACTION'] = str(cfg.jax.mem)
-
-    os.environ['XLA_FLAGS'] = (
-        '--xla_gpu_enable_triton_softmax_fusion=true '
-        '--xla_gpu_triton_gemm_any=True '
-    )
     # endregion
 
     # region VALIDATE ARGS
@@ -66,7 +58,8 @@ def main(cfg: DictConfig) -> None:
     # parameter of gating function
     gating_model = model_fn(
         num_classes=len(cfg.dataset.train_files) + 1,  # add a classifier
-        rngs=nnx.Rngs(jax.random.PRNGKey(seed=random.randint(a=0, b=100))),
+        rngs=nnx.Rngs(jax.random.key(seed=cfg.training.seed)),
+        dropout_rate=cfg.training.dropout_rate,
         dtype=eval(cfg.jax.dtype)
     )
     gating_state = nnx.Optimizer(
@@ -78,7 +71,8 @@ def main(cfg: DictConfig) -> None:
             num_epochs=cfg.training.num_epochs,
             weight_decay=cfg.training.weight_decay,
             momentum=cfg.training.momentum,
-            clipped_norm=cfg.hparams.clipped_norm
+            clipped_norm=cfg.training.clipped_norm,
+            seed=cfg.training.seed
         )
     )
 
@@ -86,15 +80,16 @@ def main(cfg: DictConfig) -> None:
 
     # vmap to create an ensemble of models modelling annotators
     @nnx.vmap(in_axes=0, out_axes=0)
-    def create_expert_model(key: jax.random.PRNGKey) -> nnx.Module:
+    def create_expert_model(key: jax.Array) -> nnx.Module:
         return model_fn(
             num_classes=cfg.dataset.num_classes,
             rngs=nnx.Rngs(key),
+            dropout_rate=cfg.training.dropout_rate,
             dtype=eval(cfg.jax.dtype)
         )
 
     keys = jax.random.split(
-        key=jax.random.PRNGKey(seed=random.randint(a=0, b=100)),
+        key=jax.random.key(seed=cfg.training.seed),
         num=len(cfg.dataset.train_files) + 1
     )
     theta_model = create_expert_model(keys)
@@ -107,7 +102,8 @@ def main(cfg: DictConfig) -> None:
             num_epochs=cfg.training.num_epochs,
             weight_decay=cfg.training.weight_decay,
             momentum=cfg.training.momentum,
-            clipped_norm=cfg.hparams.clipped_norm
+            clipped_norm=cfg.training.clipped_norm,
+            seed=cfg.training.seed
         )
     )
 
@@ -179,6 +175,44 @@ def main(cfg: DictConfig) -> None:
                 theta_state = nnx.update(theta_state.model, checkpoint.theta)
 
                 del checkpoint
+            
+            # region DATA LOADERS
+            dataloader_train = initialize_dataloader(
+                data_source=data_source_train,
+                num_epochs=cfg.training.num_epochs - start_epoch_id + 1,
+                shuffle=True,
+                seed=cfg.training.seed,
+                batch_size=cfg.training.batch_size,
+                resize=cfg.data_augmentation.resize,
+                padding_px=cfg.data_augmentation.padding_px,
+                crop_size=cfg.data_augmentation.crop_size,
+                mean=cfg.data_augmentation.mean,
+                std=cfg.data_augmentation.std,
+                p_flip=cfg.data_augmentation.prob_random_flip,
+                num_workers=cfg.data_loading.num_workers,
+                num_threads=cfg.data_loading.num_threads,
+                prefetch_size=cfg.data_loading.prefetch_size
+            )
+            data_iterator_train = iter(dataloader_train)
+
+            dataloader_test = initialize_dataloader(
+                data_source=data_source_test,
+                num_epochs=1,
+                shuffle=False,
+                seed=0,
+                batch_size=cfg.training.batch_size,
+                resize=cfg.data_augmentation.crop_size,
+                padding_px=None,
+                crop_size=None,
+                mean=cfg.data_augmentation.mean,
+                std=cfg.data_augmentation.std,
+                p_flip=None,
+                is_color_img=True,
+                num_workers=cfg.data_loading.num_workers,
+                num_threads=cfg.data_loading.num_threads,
+                prefetch_size=cfg.data_loading.prefetch_size
+            )
+            # endregion
 
             for epoch_id in tqdm(
                 iterable=range(start_epoch_id, cfg.training.num_epochs, 1),
@@ -190,9 +224,10 @@ def main(cfg: DictConfig) -> None:
                 disable=not cfg.data_loading.progress_bar
             ):
                 gating_state, theta_state, loss, p_z_train = train(
-                    data_source=data_source_train,
+                    data_iterator=data_iterator_train,
                     gating_state=gating_state,
                     theta_state=theta_state,
+                    num_samples=len(data_source_train),
                     cfg=cfg
                 )
 
@@ -209,9 +244,10 @@ def main(cfg: DictConfig) -> None:
                 )
 
                 accuracy, expert_accuracies, coverage, p_z, ece, conf_mat = evaluate(
-                    data_source=data_source_test,
+                    dataloader=dataloader_test,
                     gating_state=gating_state,
                     theta_state=theta_state,
+                    num_samples=len(data_source_test),
                     cfg=cfg
                 )
 
@@ -242,8 +278,8 @@ def main(cfg: DictConfig) -> None:
 
 if __name__ == '__main__':
     # cache Jax compilation to reduce compilation time in next runs
-    jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
-    jax.config.update("jax_persistent_cache_min_entry_size_bytes", 0)
-    jax.config.update("jax_persistent_cache_min_compile_time_secs", 120)
+    jax.config.update('jax_compilation_cache_dir', '/tmp/jax_cache')
+    jax.config.update('jax_persistent_cache_min_entry_size_bytes', 0)
+    jax.config.update('jax_persistent_cache_min_compile_time_secs', 120)
 
     main()

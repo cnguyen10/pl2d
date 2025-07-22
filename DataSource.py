@@ -1,5 +1,6 @@
 import json
 import os
+from typing import SupportsIndex
 from tqdm import tqdm
 
 import numpy as np
@@ -96,7 +97,7 @@ class ImageDataSource(grain.RandomAccessDataSource):
         self,
         annotation_files: list[str],
         ground_truth_file: str,
-        root: str = None
+        root: str | None = None
     ) -> None:
         """make the dataset from multiple annotation files.
 
@@ -118,7 +119,7 @@ class ImageDataSource(grain.RandomAccessDataSource):
             ground_truth_file=ground_truth_file
         )
 
-    def __getitem__(self, idx: int) -> dict[str, np.ndarray]:
+    def __getitem__(self, idx: SupportsIndex) -> dict[str, np.ndarray]:
         """
         """
         # load images
